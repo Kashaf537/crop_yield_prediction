@@ -113,11 +113,33 @@ app = FastAPI(
     lifespan=lifespan,  # Use lifespan instead of startup event
 )
 
+# ---------------------------------------------------------------------------
+# CORS Middleware - ENHANCED FOR STREAMLIT CLOUD
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "*",  # Allow all origins (for development)
+        "https://share.streamlit.io",
+        "https://*.streamlit.app",
+        "https://*.railway.app",
+        "https://*.up.railway.app",
+        "http://localhost:8501",  # Local Streamlit
+        "http://localhost:8000",   # Local FastAPI
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Encoding",
+        "Authorization",
+        "Content-Type",
+        "Origin",
+        "User-Agent",
+        "X-Requested-With",
+    ],
+    expose_headers=["*"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # ---------------------------------------------------------------------------
@@ -164,12 +186,25 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     model_name: str | None = None
+    metadata_loaded: bool = False
 
 class OptionsResponse(BaseModel):
     countries: list[str]
     crops: list[str]
     year_min: int
     year_max: int
+
+class DebugResponse(BaseModel):
+    base_dir: str
+    models_dir: str
+    models_dir_exists: bool
+    model_file_exists: bool
+    metadata_file_exists: bool
+    model_loaded: bool
+    metadata_loaded: bool
+    current_directory: str
+    directory_contents: list[str]
+    model_files: list[str]
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -182,31 +217,56 @@ def root():
         "health": "/health",
         "options": "GET /options",
         "predict": "POST /predict",
-        "debug": "GET /debug",  # Added debug endpoint
+        "debug": "GET /debug",
+        "cors_test": "GET /cors-test",
     }
 
-@app.get("/debug", tags=["General"])
+@app.get("/cors-test", tags=["General"])
+def cors_test():
+    """Endpoint to test CORS configuration"""
+    return {
+        "status": "success",
+        "message": "CORS is working correctly!",
+        "headers": dict(os.environ),
+    }
+
+@app.get("/debug", response_model=DebugResponse, tags=["General"])
 def debug():
     """Debug endpoint to check file structure and model status"""
-    return {
-        "base_dir": BASE_DIR,
-        "models_dir": MODELS_DIR,
-        "models_dir_exists": os.path.exists(MODELS_DIR),
-        "model_file_exists": os.path.exists(MODEL_PATH),
-        "metadata_file_exists": os.path.exists(METADATA_PATH),
-        "model_loaded": model is not None,
-        "metadata_loaded": metadata is not None,
-        "current_directory": os.getcwd(),
-        "directory_contents": os.listdir(BASE_DIR) if os.path.exists(BASE_DIR) else [],
-        "model_files": os.listdir(MODELS_DIR) if os.path.exists(MODELS_DIR) else [],
-    }
+    directory_contents = []
+    if os.path.exists(BASE_DIR):
+        try:
+            directory_contents = os.listdir(BASE_DIR)
+        except:
+            pass
+    
+    model_files = []
+    if os.path.exists(MODELS_DIR):
+        try:
+            model_files = os.listdir(MODELS_DIR)
+        except:
+            pass
+    
+    return DebugResponse(
+        base_dir=BASE_DIR,
+        models_dir=MODELS_DIR,
+        models_dir_exists=os.path.exists(MODELS_DIR),
+        model_file_exists=os.path.exists(MODEL_PATH),
+        metadata_file_exists=os.path.exists(METADATA_PATH),
+        model_loaded=model is not None,
+        metadata_loaded=metadata is not None,
+        current_directory=os.getcwd(),
+        directory_contents=directory_contents,
+        model_files=model_files,
+    )
 
 @app.get("/health", response_model=HealthResponse, tags=["General"])
 def health():
     return HealthResponse(
         status="ok" if model is not None else "model not loaded",
         model_loaded=model is not None,
-        model_name=metadata["model_name"] if metadata else None,
+        model_name=metadata.get("model_name") if metadata else None,
+        metadata_loaded=metadata is not None,
     )
 
 @app.get("/options", response_model=OptionsResponse, tags=["General"])
@@ -215,45 +275,70 @@ def options():
     if metadata is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     return OptionsResponse(
-        countries=metadata["countries"],
-        crops=metadata["crops"],
-        year_min=metadata["year_min"],
-        year_max=metadata["year_max"],
+        countries=metadata.get("countries", []),
+        crops=metadata.get("crops", []),
+        year_min=metadata.get("year_min", 1990),
+        year_max=metadata.get("year_max", 2100),
     )
 
 @app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
 def predict(payload: YieldInput):
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    if metadata is None:
+        raise HTTPException(status_code=503, detail="Metadata not loaded")
 
-    if payload.country not in metadata["countries"]:
+    # Validate country
+    countries = metadata.get("countries", [])
+    if countries and payload.country not in countries:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown country '{payload.country}'. See GET /options for valid values.",
         )
-    if payload.crop not in metadata["crops"]:
+    
+    # Validate crop
+    crops = metadata.get("crops", [])
+    if crops and payload.crop not in crops:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown crop '{payload.crop}'. See GET /options for valid values.",
         )
 
+    # Prepare features
     row = pd.DataFrame([payload.model_dump()])
     row_fe = engineer_features(row)
 
-    feature_cols = metadata["numeric_features"] + metadata["categorical_features"]
+    # Get feature columns
+    numeric_features = metadata.get("numeric_features", [])
+    categorical_features = metadata.get("categorical_features", [])
+    feature_cols = numeric_features + categorical_features
+    
+    if not feature_cols:
+        # Fallback: use all columns
+        feature_cols = row_fe.columns.tolist()
+
     try:
         pred_hg_ha = float(model.predict(row_fe[feature_cols])[0])
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
 
     pred_hg_ha = max(pred_hg_ha, 0.0)
+    
     return PredictionResponse(
         predicted_yield_hg_per_ha=round(pred_hg_ha, 1),
         predicted_yield_tonnes_per_ha=round(pred_hg_ha / 10_000, 4),
-        model_name=metadata["model_name"],
-        model_test_r2=round(metadata["test_r2"], 4),
-        model_test_rmse_hg_ha=round(metadata["test_rmse"], 1),
+        model_name=metadata.get("model_name", "Unknown"),
+        model_test_r2=round(metadata.get("test_r2", 0.0), 4),
+        model_test_rmse_hg_ha=round(metadata.get("test_rmse", 0.0), 1),
     )
+
+@app.options("/{full_path:path}")
+async def options_route(full_path: str):
+    """Handle preflight OPTIONS requests for all routes"""
+    return {
+        "message": "OK"
+    }
 
 if __name__ == "__main__":
     import uvicorn

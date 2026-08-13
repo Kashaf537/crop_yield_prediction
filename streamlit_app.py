@@ -4,6 +4,7 @@ Streamlit dashboard for the Crop Yield Prediction System.
 This app connects to the FastAPI backend deployed on Railway.
 """
 import os
+import time
 import requests
 import pandas as pd
 import plotly.express as px
@@ -13,7 +14,7 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 # Configuration - Get API URL from Streamlit Cloud secrets
 # ---------------------------------------------------------------------------
-API_URL = st.secrets.get("API_URL", "https://cropyieldprediction-production.up.railway.app")
+API_URL = st.secrets.get("API_URL", "https://cropyieldprediction-production-d94c.up.railway.app")
 
 st.set_page_config(
     page_title="Crop Yield Prediction System",
@@ -139,76 +140,147 @@ st.markdown(f"""
     .stTabs [aria-selected="true"] {{ color: {PRIMARY_LIGHT} !important; }}
 
     footer-note {{ color: #6B7280; font-size: 0.8rem; }}
+    
+    .api-status {{
+        padding: 0.5rem 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }}
+    .api-status.success {{
+        background: rgba(102, 187, 106, 0.15);
+        border: 1px solid rgba(102, 187, 106, 0.3);
+        color: {PRIMARY_LIGHT};
+    }}
+    .api-status.error {{
+        background: rgba(239, 83, 80, 0.15);
+        border: 1px solid rgba(239, 83, 80, 0.3);
+        color: #EF5350;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Load reference data from the API
+# Session State Initialization
 # ---------------------------------------------------------------------------
+if 'api_healthy' not in st.session_state:
+    st.session_state.api_healthy = False
+if 'api_checked' not in st.session_state:
+    st.session_state.api_checked = False
+if 'options' not in st.session_state:
+    st.session_state.options = None
+if 'metadata' not in st.session_state:
+    st.session_state.metadata = None
+
+# ---------------------------------------------------------------------------
+# API Connection Functions
+# ---------------------------------------------------------------------------
+def check_api_connection():
+    """Check if the API is reachable and healthy."""
+    try:
+        response = requests.get(f"{API_URL}/health", timeout=10)
+        if response.status_code == 200:
+            st.session_state.api_healthy = True
+            st.session_state.metadata = response.json()
+            return True
+        else:
+            st.session_state.api_healthy = False
+            return False
+    except requests.exceptions.ConnectionError:
+        st.session_state.api_healthy = False
+        return False
+    except requests.exceptions.Timeout:
+        st.session_state.api_healthy = False
+        return False
+    except Exception:
+        st.session_state.api_healthy = False
+        return False
+
 @st.cache_data(ttl=3600)
-def get_options():
+def fetch_options():
     """Fetch available countries, crops, and year range from the API."""
     try:
         response = requests.get(f"{API_URL}/options", timeout=10)
         if response.status_code == 200:
             return response.json()
         else:
-            st.error(f"Failed to fetch options from API: {response.status_code}")
             return None
-    except Exception as e:
-        st.error(f"Cannot connect to API: {str(e)}")
+    except Exception:
         return None
 
 @st.cache_data(ttl=3600)
-def get_metadata():
-    """Fetch model metadata from the API."""
+def fetch_cors_test():
+    """Test CORS configuration."""
     try:
-        response = requests.get(f"{API_URL}/health", timeout=10)
+        response = requests.get(f"{API_URL}/cors-test", timeout=10)
         if response.status_code == 200:
             return response.json()
         else:
             return None
-    except:
+    except Exception:
         return None
 
 @st.cache_data(ttl=3600)
 def load_reference_data():
-    """Load the reference dataset from the API or local fallback."""
-    # Try to load from the data directory as fallback
+    """Load the reference dataset from local file."""
     try:
-        data_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
-                                 "data", "crop_yield_dataset.csv")
-        if os.path.exists(data_path):
-            return pd.read_csv(data_path)
-    except:
-        pass
-    
-    # If local file doesn't exist, return None
-    return None
+        # Try multiple possible paths
+        possible_paths = [
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "crop_yield_dataset.csv"),
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "crop_yield_dataset.csv"),
+            "data/crop_yield_dataset.csv",
+            "../data/crop_yield_dataset.csv",
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                return pd.read_csv(path)
+        
+        return None
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
-# Check API health and load data
+# Check API health
 # ---------------------------------------------------------------------------
-api_healthy = False
-try:
-    health_response = requests.get(f"{API_URL}/health", timeout=5)
-    api_healthy = health_response.status_code == 200
-except:
-    api_healthy = False
+if not st.session_state.api_checked:
+    with st.spinner("Checking API connection..."):
+        st.session_state.api_checked = True
+        check_api_connection()
+        if st.session_state.api_healthy:
+            st.session_state.options = fetch_options()
 
-if not api_healthy:
-    st.error("🚨 Cannot connect to the prediction API. Please check if the API is running.")
+# Display API status
+if st.session_state.api_healthy:
+    st.markdown(
+        f'<div class="api-status success">✅ Connected to API: {API_URL}</div>',
+        unsafe_allow_html=True
+    )
+else:
+    st.markdown(
+        f'<div class="api-status error">❌ Cannot connect to API. Please check if the API is running.</div>',
+        unsafe_allow_html=True
+    )
     st.info(f"API URL: {API_URL}")
+    
+    # Add retry button
+    if st.button("🔄 Retry Connection"):
+        st.session_state.api_checked = False
+        st.rerun()
     st.stop()
 
 # Get options from API
-options = get_options()
+options = st.session_state.options
 if options is None:
-    st.error("Failed to load options from API.")
-    st.stop()
+    options = fetch_options()
+    if options is None:
+        st.error("Failed to load options from API.")
+        st.stop()
 
 # Get metadata
-api_metadata = get_metadata()
+api_metadata = st.session_state.metadata
 
 # Load reference data (for visualizations)
 ref = load_reference_data()
@@ -381,6 +453,12 @@ if submitted:
                         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
                     st.markdown('</div>', unsafe_allow_html=True)
                 
+            elif response.status_code == 422:
+                st.error("Invalid input. Please check your parameters.")
+                try:
+                    st.json(response.json())
+                except:
+                    st.write(response.text)
             else:
                 st.error(f"API Error: {response.status_code}")
                 try:
@@ -390,6 +468,10 @@ if submitted:
                     
         except requests.exceptions.ConnectionError:
             st.error("❌ Cannot connect to API. Please check if the API is running.")
+            # Try to reconnect
+            if st.button("🔄 Reconnect to API"):
+                st.session_state.api_checked = False
+                st.rerun()
         except requests.exceptions.Timeout:
             st.error("❌ Request timed out. Please try again.")
         except Exception as e:
@@ -445,6 +527,28 @@ if ref is not None:
 
     with st.expander("🔎  Preview raw dataset"):
         st.dataframe(ref.head(50), use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# Debug section in sidebar
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.title("🔧 Debug Info")
+    st.write(f"**API URL:** {API_URL}")
+    st.write(f"**API Status:** {'✅ Connected' if st.session_state.api_healthy else '❌ Disconnected'}")
+    st.write(f"**Model:** {model_name}")
+    
+    if ref is not None:
+        st.write(f"**Reference Data:** {len(ref)} rows")
+    
+    # CORS Test
+    if st.button("🧪 Test CORS"):
+        with st.spinner("Testing CORS..."):
+            cors_result = fetch_cors_test()
+            if cors_result:
+                st.success("✅ CORS Test Passed!")
+                st.json(cors_result)
+            else:
+                st.error("❌ CORS Test Failed")
 
 st.markdown(
     f'<p class="footer-note">Model served via FastAPI · API: {API_URL}</p>',
