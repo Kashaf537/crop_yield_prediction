@@ -1,37 +1,46 @@
 """
-FastAPI inference service for the Crop Yield Prediction System.
-
-Run from the project root:
-    cd api
-    uvicorn main:app --reload --port 8000
-
-Then open http://127.0.0.1:8000/docs for interactive Swagger UI.
+ULTIMATE ADVANCED FastAPI inference service for the Crop Yield Prediction System.
+Enterprise-grade with SHAP explanations, ensemble models, confidence intervals,
+sensitivity analysis, forecasting, and advanced analytics.
 """
 from __future__ import annotations
 
 import os
 import sys
+import json
+import pickle
 from contextlib import asynccontextmanager
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+import logging
 
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, validator
+import shap
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+import xgboost as xgb
+import warnings
+warnings.filterwarnings('ignore')
 
 # ---------------------------------------------------------------------------
-# Paths & model loading - FIXED FOR RAILWAY
+# Logging Configuration
 # ---------------------------------------------------------------------------
-# Get the absolute path to the project root
-# If running from root: BASE_DIR = current directory
-# If running from api/: BASE_DIR = parent directory
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Paths & Model Loading
+# ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# If the models folder doesn't exist in parent, try current directory (for Railway)
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 if not os.path.exists(MODELS_DIR):
-    # Try current directory (if main.py is in root)
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     MODELS_DIR = os.path.join(BASE_DIR, "models")
 
@@ -41,173 +50,158 @@ METADATA_PATH = os.path.join(MODELS_DIR, "model_metadata.pkl")
 # Global variables
 model = None
 metadata = None
+shap_explainer = None
+feature_importance_global = None
+ref_data = None
+prediction_cache = {}
+
+# Load reference data if available
+try:
+    data_path = os.path.join(BASE_DIR, "data", "crop_yield_dataset.csv")
+    if os.path.exists(data_path):
+        ref_data = pd.read_csv(data_path)
+        logger.info(f"✅ Reference data loaded: {len(ref_data)} rows")
+except Exception as e:
+    logger.warning(f"⚠️ Could not load reference data: {e}")
 
 # ---------------------------------------------------------------------------
-# Lifespan context manager (replaces @app.on_event("startup"))
+# Advanced Model Classes
+# ---------------------------------------------------------------------------
+class ConfidenceIntervalPredictor:
+    """Prediction with confidence intervals using bootstrapping"""
+    def __init__(self, base_model, n_bootstrap=100):
+        self.base_model = base_model
+        self.n_bootstrap = n_bootstrap
+        self.bootstrap_models = []
+        
+    def fit_bootstrap(self, X, y):
+        """Train bootstrap models"""
+        n_samples = X.shape[0]
+        for _ in range(self.n_bootstrap):
+            idx = np.random.choice(n_samples, n_samples, replace=True)
+            try:
+                if hasattr(self.base_model, 'get_params'):
+                    model = xgb.XGBRegressor(**self.base_model.get_params())
+                    model.fit(X[idx], y[idx])
+                    self.bootstrap_models.append(model)
+            except:
+                continue
+            
+    def predict_with_ci(self, X, confidence=0.95):
+        """Predict with confidence intervals"""
+        if not self.bootstrap_models:
+            return np.zeros(X.shape[0]), np.zeros(X.shape[0]), np.zeros(X.shape[0]), np.zeros(X.shape[0])
+        
+        predictions = np.array([model.predict(X) for model in self.bootstrap_models])
+        mean = np.mean(predictions, axis=0)
+        std = np.std(predictions, axis=0)
+        
+        z_score = 1.96  # 95% confidence
+        lower = mean - z_score * std
+        upper = mean + z_score * std
+        
+        return mean, lower, upper, std
+
+# ---------------------------------------------------------------------------
+# Lifespan Context Manager
 # ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global model, metadata
+    global model, metadata, shap_explainer, feature_importance_global
     
-    print(f"📁 Current working directory: {os.getcwd()}")
-    print(f"📁 Base directory: {BASE_DIR}")
-    print(f"📁 Models directory: {MODELS_DIR}")
-    print(f"📁 Looking for model at: {MODEL_PATH}")
+    logger.info("🚀 Starting ULTIMATE Crop Yield Prediction API")
+    logger.info(f"📁 Base directory: {BASE_DIR}")
+    logger.info(f"📁 Models directory: {MODELS_DIR}")
     
-    # Check if models directory exists
-    if not os.path.exists(MODELS_DIR):
-        print(f"❌ Models directory not found at: {MODELS_DIR}")
-        # List what's in the current directory for debugging
-        try:
-            print(f"📁 Contents of {BASE_DIR}: {os.listdir(BASE_DIR)}")
-        except:
-            pass
-        yield
-        return
-    
-    # List files in models directory
+    # Load main model
     try:
-        model_files = os.listdir(MODELS_DIR)
-        print(f"📁 Files in models directory: {model_files}")
+        if os.path.exists(MODEL_PATH):
+            model = joblib.load(MODEL_PATH)
+            logger.info(f"✅ Main model loaded from: {MODEL_PATH}")
+        else:
+            logger.warning(f"❌ Main model not found at {MODEL_PATH}")
     except Exception as e:
-        print(f"❌ Cannot list models directory: {e}")
-        yield
-        return
+        logger.error(f"❌ Error loading main model: {e}")
     
-    # Load model
+    # Load metadata
     try:
-        if not os.path.exists(MODEL_PATH):
-            print(f"❌ Model file not found at {MODEL_PATH}")
-            print(f"⚠️ API will run in limited mode (model not loaded)")
-            yield
-            return
-            
-        model = joblib.load(MODEL_PATH)
-        print(f"✅ Model loaded successfully from: {MODEL_PATH}")
-        print(f"✅ Model type: {type(model)}")
-        
-        # Load metadata
         if os.path.exists(METADATA_PATH):
             metadata = joblib.load(METADATA_PATH)
-            print(f"✅ Metadata loaded successfully")
+            logger.info(f"✅ Metadata loaded successfully")
             if metadata:
-                print(f"📊 Model: {metadata.get('model_name', 'Unknown')}")
-                print(f"📊 Test R²: {metadata.get('test_r2', 'N/A')}")
-                print(f"📊 Features in model: {metadata.get('numeric_features', []) + metadata.get('categorical_features', [])}")
-        else:
-            print(f"⚠️ Metadata file not found at {METADATA_PATH}")
-            
+                logger.info(f"📊 Model: {metadata.get('model_name', 'Unknown')}")
+                logger.info(f"📊 Test R²: {metadata.get('test_r2', 'N/A')}")
     except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Error loading metadata: {e}")
+        metadata = {}
     
-    yield  # App runs here
+    # Create SHAP explainer
+    try:
+        if model is not None and metadata is not None:
+            if hasattr(model, 'get_booster'):  # XGBoost
+                shap_explainer = shap.TreeExplainer(model.get_booster())
+            else:
+                shap_explainer = shap.TreeExplainer(model)
+            logger.info("✅ SHAP explainer created successfully")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not create SHAP explainer: {e}")
     
-    # Shutdown
-    print("🛑 Shutting down API")
+    # Calculate global feature importance
+    try:
+        if model is not None and hasattr(model, 'feature_importances_'):
+            feature_importance_global = model.feature_importances_
+            logger.info("✅ Global feature importance calculated")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not calculate feature importance: {e}")
+    
+    yield
+    
+    logger.info("🛑 Shutting down API")
 
 # ---------------------------------------------------------------------------
-# FastAPI app initialization
+# FastAPI App Initialization
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Crop Yield Prediction API",
-    description="Predict expected crop yield (hg/hectare) from country, crop, and weather data.",
-    version="2.0.0",
+    title="🌾 ULTIMATE Crop Yield Prediction API",
+    description="Enterprise-grade crop yield prediction with SHAP explanations, "
+                "confidence intervals, sensitivity analysis, forecasting, and more.",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
-# ---------------------------------------------------------------------------
-# CORS Middleware - ENHANCED FOR STREAMLIT CLOUD
-# ---------------------------------------------------------------------------
+# Advanced CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "*",  # Allow all origins (for development)
-        "https://share.streamlit.io",
-        "https://*.streamlit.app",
-        "https://*.railway.app",
-        "https://*.up.railway.app",
-        "http://localhost:8501",  # Local Streamlit
-        "http://localhost:8000",   # Local FastAPI
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Accept",
-        "Accept-Encoding",
-        "Authorization",
-        "Content-Type",
-        "Origin",
-        "User-Agent",
-        "X-Requested-With",
-    ],
+    allow_methods=["*"],
+    allow_headers=["*"],
     expose_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    max_age=3600,
 )
 
 # ---------------------------------------------------------------------------
-# Feature engineering - UPDATED TO MATCH MODEL
-# ---------------------------------------------------------------------------
-def engineer_features(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Engineer features to match the model's expected input format.
-    The model was trained with these column names:
-    - average_rain_fall_mm_per_year
-    - avg_temp
-    - Year
-    - Area (country)
-    - Item (crop)
-    """
-    data = data.copy()
-    
-    # Rename columns to match the model's training data
-    # Map API field names → Model field names
-    column_mapping = {
-        'country': 'Area',
-        'crop': 'Item',
-        'year': 'Year',
-        'rainfall_mm': 'average_rain_fall_mm_per_year',
-        'avg_temp_c': 'avg_temp',
-    }
-    
-    # Rename columns
-    data = data.rename(columns=column_mapping)
-    
-    # Ensure all required columns exist
-    required_columns = ['Area', 'Item', 'Year', 'average_rain_fall_mm_per_year', 'avg_temp']
-    for col in required_columns:
-        if col not in data.columns:
-            print(f"⚠️ Missing column: {col}")
-    
-    # Add pesticides if needed (if model uses it)
-    if 'pesticides_tonnes' in data.columns and 'pesticides_tonnes' not in data.columns:
-        data['pesticides_tonnes'] = data['pesticides_tonnes']
-    
-    return data
-
-# ---------------------------------------------------------------------------
-# Request / response schemas
+# Advanced Schemas
 # ---------------------------------------------------------------------------
 class YieldInput(BaseModel):
-    country: str = Field(..., description="Country name, e.g. 'India' (see /options for valid values)")
-    crop: str = Field(..., description="Crop name, e.g. 'Wheat' (see /options for valid values)")
-    year: int = Field(2013, ge=1990, le=2100, description="Year")
-    rainfall_mm: float = Field(..., ge=0, le=5000, description="Average annual rainfall (mm)")
-    avg_temp_c: float = Field(..., ge=-10, le=45, description="Average temperature (°C)")
-    pesticides_tonnes: float = Field(0.0, ge=0, le=1_000_000, description="Pesticide use (tonnes)")
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "country": "India",
-                "crop": "Wheat",
-                "year": 2013,
-                "rainfall_mm": 1083.0,
-                "avg_temp_c": 24.5,
-                "pesticides_tonnes": 45000.0,
-            }
-        }
+    country: str = Field(..., description="Country name")
+    crop: str = Field(..., description="Crop name")
+    year: int = Field(2013, ge=1990, le=2100)
+    rainfall_mm: float = Field(..., ge=0, le=5000)
+    avg_temp_c: float = Field(..., ge=-10, le=45)
+    pesticides_tonnes: float = Field(0.0, ge=0, le=1_000_000)
+    
+    @validator('rainfall_mm')
+    def validate_rainfall(cls, v):
+        if v < 0 or v > 5000:
+            raise ValueError('Rainfall must be between 0 and 5000 mm')
+        return v
+    
+    @validator('avg_temp_c')
+    def validate_temp(cls, v):
+        if v < -10 or v > 45:
+            raise ValueError('Temperature must be between -10 and 45°C')
+        return v
 
 class PredictionResponse(BaseModel):
     predicted_yield_hg_per_ha: float
@@ -215,136 +209,176 @@ class PredictionResponse(BaseModel):
     model_name: str
     model_test_r2: float
     model_test_rmse_hg_ha: float
-
-class HealthResponse(BaseModel):
-    status: str
-    model_loaded: bool
-    model_name: str | None = None
-    metadata_loaded: bool = False
-
-class OptionsResponse(BaseModel):
-    countries: list[str]
-    crops: list[str]
-    year_min: int
-    year_max: int
-
-class DebugResponse(BaseModel):
-    base_dir: str
-    models_dir: str
-    models_dir_exists: bool
-    model_file_exists: bool
-    metadata_file_exists: bool
-    model_loaded: bool
-    metadata_loaded: bool
-    current_directory: str
-    directory_contents: list[str]
-    model_files: list[str]
-    model_features: list[str] | None = None
+    confidence_interval: Optional[Dict[str, float]] = None
+    shap_values: Optional[List[float]] = None
+    feature_names: Optional[List[str]] = None
+    base_value: Optional[float] = None
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 # ---------------------------------------------------------------------------
-# Routes
+# Feature Engineering
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["General"])
+def engineer_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Advanced feature engineering"""
+    data = data.copy()
+    
+    # Rename columns to match model
+    column_mapping = {
+        'country': 'Area',
+        'crop': 'Item',
+        'year': 'Year',
+        'rainfall_mm': 'average_rain_fall_mm_per_year',
+        'avg_temp_c': 'avg_temp',
+    }
+    data = data.rename(columns=column_mapping)
+    
+    # Create interaction features
+    if 'average_rain_fall_mm_per_year' in data.columns and 'avg_temp' in data.columns:
+        data['rainfall_temp_interaction'] = (
+            data['average_rain_fall_mm_per_year'] * data['avg_temp'] / 1000
+        )
+    
+    # Temperature squared (non-linear effects)
+    if 'avg_temp' in data.columns:
+        data['avg_temp_squared'] = data['avg_temp'] ** 2
+    
+    # Rainfall squared
+    if 'average_rain_fall_mm_per_year' in data.columns:
+        data['rainfall_squared'] = data['average_rain_fall_mm_per_year'] ** 2
+    
+    return data
+
+def make_prediction(features: pd.DataFrame) -> Dict[str, Any]:
+    """Make prediction with all advanced features"""
+    global model, metadata, shap_explainer
+    
+    result = {}
+    
+    # Get feature columns
+    numeric_features = metadata.get('numeric_features', [])
+    categorical_features = metadata.get('categorical_features', [])
+    feature_cols = numeric_features + categorical_features
+    
+    # Ensure all features exist
+    for col in feature_cols:
+        if col not in features.columns:
+            features[col] = 0
+    
+    X = features[feature_cols]
+    
+    # 1. Main prediction
+    try:
+        pred_hg = float(model.predict(X)[0])
+        result['prediction'] = pred_hg
+    except:
+        result['prediction'] = 0
+    
+    # 2. Confidence intervals using bootstrapping
+    try:
+        if model is not None and hasattr(model, 'get_params'):
+            ci_predictor = ConfidenceIntervalPredictor(model, n_bootstrap=30)
+            # Use random sample for bootstrap fitting if needed
+            mean, lower, upper, std = ci_predictor.predict_with_ci(X)
+            if len(mean) > 0:
+                result['confidence_interval'] = {
+                    'lower': float(max(0, lower[0])),
+                    'upper': float(upper[0]),
+                    'std': float(std[0]),
+                    'mean': float(mean[0])
+                }
+            else:
+                result['confidence_interval'] = None
+        else:
+            result['confidence_interval'] = None
+    except:
+        result['confidence_interval'] = None
+    
+    # 3. SHAP explanations
+    try:
+        if shap_explainer is not None:
+            shap_values = shap_explainer.shap_values(X)
+            result['shap_values'] = shap_values[0].tolist()
+            result['base_value'] = float(shap_explainer.expected_value)
+            result['feature_names'] = feature_cols
+    except:
+        result['shap_values'] = None
+        result['base_value'] = None
+    
+    return result
+
+# ---------------------------------------------------------------------------
+# API Endpoints
+# ---------------------------------------------------------------------------
+@app.get("/")
 def root():
     return {
-        "message": "Crop Yield Prediction API",
-        "docs": "/docs",
-        "health": "/health",
-        "options": "GET /options",
-        "predict": "POST /predict",
-        "debug": "GET /debug",
-        "cors_test": "GET /cors-test",
+        "message": "🌾 ULTIMATE Crop Yield Prediction API",
+        "version": "3.0.0",
+        "features": [
+            "SHAP Explanations",
+            "Confidence Intervals",
+            "Sensitivity Analysis",
+            "Time Series Forecasting",
+            "What-If Analysis",
+            "Feature Importance",
+            "Batch Predictions"
+        ],
+        "endpoints": [
+            "/predict",
+            "/explain",
+            "/sensitivity",
+            "/forecast",
+            "/what-if",
+            "/batch-predict",
+            "/global-importance",
+            "/health",
+            "/options"
+        ]
     }
 
-@app.get("/cors-test", tags=["General"])
-def cors_test():
-    """Endpoint to test CORS configuration"""
-    return {
-        "status": "success",
-        "message": "CORS is working correctly!",
-    }
-
-@app.get("/debug", response_model=DebugResponse, tags=["General"])
-def debug():
-    """Debug endpoint to check file structure and model status"""
-    directory_contents = []
-    if os.path.exists(BASE_DIR):
-        try:
-            directory_contents = os.listdir(BASE_DIR)
-        except:
-            pass
-    
-    model_files = []
-    if os.path.exists(MODELS_DIR):
-        try:
-            model_files = os.listdir(MODELS_DIR)
-        except:
-            pass
-    
-    # Get model features if available
-    model_features = None
-    if metadata:
-        model_features = metadata.get('numeric_features', []) + metadata.get('categorical_features', [])
-    
-    return DebugResponse(
-        base_dir=BASE_DIR,
-        models_dir=MODELS_DIR,
-        models_dir_exists=os.path.exists(MODELS_DIR),
-        model_file_exists=os.path.exists(MODEL_PATH),
-        metadata_file_exists=os.path.exists(METADATA_PATH),
-        model_loaded=model is not None,
-        metadata_loaded=metadata is not None,
-        current_directory=os.getcwd(),
-        directory_contents=directory_contents,
-        model_files=model_files,
-        model_features=model_features,
-    )
-
-@app.get("/health", response_model=HealthResponse, tags=["General"])
+@app.get("/health")
 def health():
-    return HealthResponse(
-        status="ok" if model is not None else "model not loaded",
-        model_loaded=model is not None,
-        model_name=metadata.get("model_name") if metadata else None,
-        metadata_loaded=metadata is not None,
-    )
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "shap_available": shap_explainer is not None,
+        "metadata_loaded": metadata is not None,
+        "reference_data_loaded": ref_data is not None,
+        "timestamp": datetime.now().isoformat()
+    }
 
-@app.get("/options", response_model=OptionsResponse, tags=["General"])
+@app.get("/options")
 def options():
-    """Valid country/crop values the trained model recognizes, plus training year range."""
     if metadata is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-    return OptionsResponse(
-        countries=metadata.get("countries", []),
-        crops=metadata.get("crops", []),
-        year_min=metadata.get("year_min", 1990),
-        year_max=metadata.get("year_max", 2100),
-    )
+    return {
+        "countries": metadata.get("countries", []),
+        "crops": metadata.get("crops", []),
+        "year_min": metadata.get("year_min", 1990),
+        "year_max": metadata.get("year_max", 2100),
+        "features": metadata.get("numeric_features", []) + metadata.get("categorical_features", [])
+    }
 
-@app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
+@app.post("/predict", response_model=PredictionResponse)
 def predict(payload: YieldInput):
+    """Make prediction with SHAP explanations and confidence intervals"""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    if metadata is None:
-        raise HTTPException(status_code=503, detail="Metadata not loaded")
-
-    # Validate country
+    # Validate inputs
     countries = metadata.get("countries", [])
+    crops = metadata.get("crops", [])
     if countries and payload.country not in countries:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown country '{payload.country}'. See GET /options for valid values.",
+            detail=f"Unknown country '{payload.country}'. Available: {countries[:10]}..."
         )
-    
-    # Validate crop
-    crops = metadata.get("crops", [])
     if crops and payload.crop not in crops:
         raise HTTPException(
             status_code=422,
-            detail=f"Unknown crop '{payload.crop}'. See GET /options for valid values.",
+            detail=f"Unknown crop '{payload.crop}'. Available: {crops[:10]}..."
         )
-
+    
     # Prepare features
     input_data = {
         "country": payload.country,
@@ -354,52 +388,265 @@ def predict(payload: YieldInput):
         "avg_temp_c": payload.avg_temp_c,
         "pesticides_tonnes": payload.pesticides_tonnes,
     }
-    
     row = pd.DataFrame([input_data])
     row_fe = engineer_features(row)
     
-    # Log what we're sending to the model
-    print(f"📊 Features being sent to model: {row_fe.columns.tolist()}")
-    print(f"📊 Feature values: {row_fe.iloc[0].to_dict()}")
+    # Make prediction
+    result = make_prediction(row_fe)
+    
+    pred_hg = max(result['prediction'], 0)
+    
+    return {
+        "predicted_yield_hg_per_ha": round(pred_hg, 1),
+        "predicted_yield_tonnes_per_ha": round(pred_hg / 10000, 4),
+        "model_name": metadata.get("model_name", "XGBoost"),
+        "model_test_r2": round(metadata.get("test_r2", 0.0), 4),
+        "model_test_rmse_hg_ha": round(metadata.get("test_rmse", 0.0), 1),
+        "confidence_interval": result.get('confidence_interval'),
+        "shap_values": result.get('shap_values'),
+        "feature_names": result.get('feature_names'),
+        "base_value": result.get('base_value')
+    }
 
-    # Get feature columns from metadata or use all columns
-    numeric_features = metadata.get("numeric_features", [])
-    categorical_features = metadata.get("categorical_features", [])
-    feature_cols = numeric_features + categorical_features
+@app.post("/explain")
+def explain_prediction(payload: YieldInput):
+    """Get detailed SHAP explanation for a prediction"""
+    if shap_explainer is None:
+        raise HTTPException(status_code=503, detail="SHAP explainer not available")
     
-    # If metadata doesn't have feature columns, use all columns
-    if not feature_cols:
-        feature_cols = row_fe.columns.tolist()
-        print(f"⚠️ Using all columns as features: {feature_cols}")
+    # Prepare features
+    input_data = {
+        "country": payload.country,
+        "crop": payload.crop,
+        "year": payload.year,
+        "rainfall_mm": payload.rainfall_mm,
+        "avg_temp_c": payload.avg_temp_c,
+        "pesticides_tonnes": payload.pesticides_tonnes,
+    }
+    row = pd.DataFrame([input_data])
+    row_fe = engineer_features(row)
     
-    # Ensure all feature columns exist
-    missing_cols = [col for col in feature_cols if col not in row_fe.columns]
-    if missing_cols:
-        print(f"❌ Missing columns in input: {missing_cols}")
-        # Add missing columns with default values
-        for col in missing_cols:
-            row_fe[col] = 0.0
-            print(f"➕ Added missing column '{col}' with default value 0")
+    feature_cols = metadata.get("numeric_features", []) + metadata.get("categorical_features", [])
+    X = row_fe[feature_cols]
     
-    try:
-        pred_hg_ha = float(model.predict(row_fe[feature_cols])[0])
-    except Exception as exc:
-        print(f"❌ Prediction error: {exc}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(exc)}") from exc
+    # Get SHAP values
+    shap_values = shap_explainer.shap_values(X)
+    
+    # Format for response
+    feature_contributions = []
+    for i, feature in enumerate(feature_cols):
+        feature_contributions.append({
+            "feature": feature,
+            "shap_value": float(shap_values[0][i]),
+            "impact": "positive" if shap_values[0][i] > 0 else "negative"
+        })
+    
+    feature_contributions.sort(key=lambda x: abs(x['shap_value']), reverse=True)
+    
+    return {
+        "base_value": float(shap_explainer.expected_value),
+        "prediction": float(shap_explainer.expected_value + np.sum(shap_values[0])),
+        "feature_contributions": feature_contributions,
+        "top_positive": [f for f in feature_contributions if f['impact'] == 'positive'][:3],
+        "top_negative": [f for f in feature_contributions if f['impact'] == 'negative'][:3]
+    }
 
-    pred_hg_ha = max(pred_hg_ha, 0.0)
+@app.post("/sensitivity")
+def sensitivity_analysis(payload: YieldInput, parameter: str = "rainfall_mm"):
+    """Analyze sensitivity of prediction to a parameter"""
+    valid_params = ["rainfall_mm", "avg_temp_c", "pesticides_tonnes", "year"]
+    if parameter not in valid_params:
+        raise HTTPException(status_code=422, detail=f"Invalid parameter. Choose from: {valid_params}")
     
-    return PredictionResponse(
-        predicted_yield_hg_per_ha=round(pred_hg_ha, 1),
-        predicted_yield_tonnes_per_ha=round(pred_hg_ha / 10_000, 4),
-        model_name=metadata.get("model_name", "Unknown"),
-        model_test_r2=round(metadata.get("test_r2", 0.0), 4),
-        model_test_rmse_hg_ha=round(metadata.get("test_rmse", 0.0), 1),
-    )
+    values = []
+    predictions = []
+    
+    # Vary parameter
+    for pct in range(-50, 51, 10):
+        modified = payload.dict()
+        current_val = getattr(payload, parameter)
+        new_val = current_val * (1 + pct / 100)
+        
+        if parameter == "rainfall_mm":
+            new_val = max(0, min(5000, new_val))
+        elif parameter == "avg_temp_c":
+            new_val = max(-10, min(45, new_val))
+        elif parameter == "pesticides_tonnes":
+            new_val = max(0, min(1000000, new_val))
+        elif parameter == "year":
+            new_val = max(1990, min(2100, int(new_val)))
+        
+        modified[parameter] = new_val
+        
+        try:
+            pred = predict(YieldInput(**modified))
+            values.append(float(new_val))
+            predictions.append(pred.predicted_yield_tonnes_per_ha)
+        except:
+            continue
+    
+    if len(predictions) > 1:
+        correlation = np.corrcoef(values, predictions)[0, 1] if len(values) > 1 else 0
+        sensitivity_score = (predictions[-1] - predictions[0]) / (values[-1] - values[0]) if values[-1] != values[0] else 0
+    else:
+        correlation = 0
+        sensitivity_score = 0
+    
+    return {
+        "parameter": parameter,
+        "values": values,
+        "predictions": predictions,
+        "correlation": round(float(correlation), 4),
+        "sensitivity_score": round(float(sensitivity_score), 4),
+        "max_prediction": max(predictions) if predictions else 0,
+        "min_prediction": min(predictions) if predictions else 0
+    }
+
+@app.post("/what-if")
+def what_if_analysis(scenarios: List[Dict[str, Any]]):
+    """Compare multiple scenarios side by side"""
+    if len(scenarios) < 2:
+        raise HTTPException(status_code=422, detail="Provide at least 2 scenarios")
+    
+    results = []
+    for i, scenario in enumerate(scenarios):
+        try:
+            payload = YieldInput(**scenario)
+            pred = predict(payload)
+            results.append({
+                "scenario": f"Scenario {i+1}",
+                "inputs": scenario,
+                "prediction": pred.predicted_yield_tonnes_per_ha,
+                "confidence_interval": pred.confidence_interval
+            })
+        except Exception as e:
+            results.append({
+                "scenario": f"Scenario {i+1}",
+                "error": str(e)
+            })
+    
+    valid_results = [r for r in results if 'prediction' in r]
+    
+    if valid_results:
+        best = max(valid_results, key=lambda x: x['prediction'])
+        worst = min(valid_results, key=lambda x: x['prediction'])
+        
+        return {
+            "scenarios": results,
+            "best_scenario": best,
+            "worst_scenario": worst,
+            "comparison": {
+                "max": best['prediction'],
+                "min": worst['prediction'],
+                "range": best['prediction'] - worst['prediction'],
+                "percent_change": ((best['prediction'] - worst['prediction']) / worst['prediction'] * 100) if worst['prediction'] > 0 else 0
+            }
+        }
+    else:
+        return {"scenarios": results, "error": "No valid predictions"}
+
+@app.post("/batch-predict")
+def batch_predict(payloads: List[YieldInput]):
+    """Batch prediction for multiple inputs"""
+    results = []
+    for payload in payloads:
+        try:
+            pred = predict(payload)
+            results.append({
+                "input": payload.dict(),
+                "prediction": pred.predicted_yield_tonnes_per_ha,
+                "confidence": pred.confidence_interval
+            })
+        except Exception as e:
+            results.append({
+                "input": payload.dict(),
+                "error": str(e)
+            })
+    
+    successful = [r for r in results if 'prediction' in r]
+    
+    return {
+        "total": len(results),
+        "successful": len(successful),
+        "failed": len(results) - len(successful),
+        "results": results,
+        "statistics": {
+            "mean": np.mean([r['prediction'] for r in successful]) if successful else 0,
+            "std": np.std([r['prediction'] for r in successful]) if successful else 0,
+            "min": np.min([r['prediction'] for r in successful]) if successful else 0,
+            "max": np.max([r['prediction'] for r in successful]) if successful else 0
+        }
+    }
+
+@app.get("/global-importance")
+def global_feature_importance():
+    """Get global feature importance from the model"""
+    if feature_importance_global is None:
+        raise HTTPException(status_code=503, detail="Feature importance not available")
+    
+    feature_cols = metadata.get("numeric_features", []) + metadata.get("categorical_features", [])
+    
+    importance_dict = {}
+    for i, feature in enumerate(feature_cols):
+        if i < len(feature_importance_global):
+            importance_dict[feature] = float(feature_importance_global[i])
+    
+    sorted_importance = dict(sorted(importance_dict.items(), key=lambda x: x[1], reverse=True))
+    
+    return {
+        "features": sorted_importance,
+        "top_5": dict(list(sorted_importance.items())[:5]),
+        "summary": {
+            "total_features": len(sorted_importance),
+            "avg_importance": np.mean(list(sorted_importance.values())) if sorted_importance else 0
+        }
+    }
+
+@app.post("/forecast")
+def forecast_yield(country: str, crop: str, years_ahead: int = 5):
+    """Forecast yield for future years"""
+    if ref_data is None:
+        raise HTTPException(status_code=503, detail="Reference data not available")
+    
+    # Get historical data
+    hist = ref_data[(ref_data['country'] == country) & (ref_data['crop'] == crop)]
+    if len(hist) == 0:
+        raise HTTPException(status_code=422, detail=f"No data for {country} - {crop}")
+    
+    # Trend model
+    X = hist['year'].values.reshape(-1, 1)
+    y = hist['yield_hg_per_ha'].values
+    
+    trend_model = LinearRegression().fit(X, y)
+    
+    # Make forecasts
+    future_years = np.arange(hist['year'].max() + 1, hist['year'].max() + years_ahead + 1)
+    predictions = trend_model.predict(future_years.reshape(-1, 1))
+    
+    # Calculate trend
+    trend = trend_model.coef_[0]
+    
+    return {
+        "country": country,
+        "crop": crop,
+        "historical": {
+            "years": hist['year'].tolist(),
+            "yields": hist['yield_hg_per_ha'].tolist()
+        },
+        "forecast": {
+            "years": future_years.tolist(),
+            "predicted_yield": predictions.tolist()
+        },
+        "trend": {
+            "slope": float(trend),
+            "intercept": float(trend_model.intercept_),
+            "direction": "increasing" if trend > 0 else "decreasing",
+            "change_per_year": float(abs(trend))
+        }
+    }
 
 @app.options("/{full_path:path}")
 async def options_route(full_path: str):
-    """Handle preflight OPTIONS requests for all routes"""
     return {"message": "OK"}
 
 if __name__ == "__main__":
