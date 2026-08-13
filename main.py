@@ -84,19 +84,23 @@ async def lifespan(app: FastAPI):
             
         model = joblib.load(MODEL_PATH)
         print(f"✅ Model loaded successfully from: {MODEL_PATH}")
+        print(f"✅ Model type: {type(model)}")
         
         # Load metadata
         if os.path.exists(METADATA_PATH):
             metadata = joblib.load(METADATA_PATH)
             print(f"✅ Metadata loaded successfully")
-            print(f"📊 Model: {metadata.get('model_name', 'Unknown')}")
-            print(f"📊 Test R²: {metadata.get('test_r2', 'N/A')}")
+            if metadata:
+                print(f"📊 Model: {metadata.get('model_name', 'Unknown')}")
+                print(f"📊 Test R²: {metadata.get('test_r2', 'N/A')}")
+                print(f"📊 Features in model: {metadata.get('numeric_features', []) + metadata.get('categorical_features', [])}")
         else:
             print(f"⚠️ Metadata file not found at {METADATA_PATH}")
             
     except Exception as e:
         print(f"❌ Error loading model: {e}")
-        # Don't raise - allow API to start for debugging
+        import traceback
+        traceback.print_exc()
     
     yield  # App runs here
     
@@ -110,7 +114,7 @@ app = FastAPI(
     title="Crop Yield Prediction API",
     description="Predict expected crop yield (hg/hectare) from country, crop, and weather data.",
     version="2.0.0",
-    lifespan=lifespan,  # Use lifespan instead of startup event
+    lifespan=lifespan,
 )
 
 # ---------------------------------------------------------------------------
@@ -143,13 +147,43 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------------------
-# Feature engineering (must mirror src/prepare_dataset.py / the notebook)
+# Feature engineering - UPDATED TO MATCH MODEL
 # ---------------------------------------------------------------------------
 def engineer_features(data: pd.DataFrame) -> pd.DataFrame:
+    """
+    Engineer features to match the model's expected input format.
+    The model was trained with these column names:
+    - average_rain_fall_mm_per_year
+    - avg_temp
+    - Year
+    - Area (country)
+    - Item (crop)
+    """
     data = data.copy()
-    data["temp_rain_interaction"] = data["avg_temp_c"] * data["rainfall_mm"] / 1000
-    data["log_pesticides"] = np.log1p(data["pesticides_tonnes"])
-    data["years_since_1990"] = data["year"] - 1990
+    
+    # Rename columns to match the model's training data
+    # Map API field names → Model field names
+    column_mapping = {
+        'country': 'Area',
+        'crop': 'Item',
+        'year': 'Year',
+        'rainfall_mm': 'average_rain_fall_mm_per_year',
+        'avg_temp_c': 'avg_temp',
+    }
+    
+    # Rename columns
+    data = data.rename(columns=column_mapping)
+    
+    # Ensure all required columns exist
+    required_columns = ['Area', 'Item', 'Year', 'average_rain_fall_mm_per_year', 'avg_temp']
+    for col in required_columns:
+        if col not in data.columns:
+            print(f"⚠️ Missing column: {col}")
+    
+    # Add pesticides if needed (if model uses it)
+    if 'pesticides_tonnes' in data.columns and 'pesticides_tonnes' not in data.columns:
+        data['pesticides_tonnes'] = data['pesticides_tonnes']
+    
     return data
 
 # ---------------------------------------------------------------------------
@@ -161,7 +195,7 @@ class YieldInput(BaseModel):
     year: int = Field(2013, ge=1990, le=2100, description="Year")
     rainfall_mm: float = Field(..., ge=0, le=5000, description="Average annual rainfall (mm)")
     avg_temp_c: float = Field(..., ge=-10, le=45, description="Average temperature (°C)")
-    pesticides_tonnes: float = Field(..., ge=0, le=1_000_000, description="Pesticide use (tonnes)")
+    pesticides_tonnes: float = Field(0.0, ge=0, le=1_000_000, description="Pesticide use (tonnes)")
 
     class Config:
         json_schema_extra = {
@@ -171,7 +205,7 @@ class YieldInput(BaseModel):
                 "year": 2013,
                 "rainfall_mm": 1083.0,
                 "avg_temp_c": 24.5,
-                "pesticides_tonnes": 45000,
+                "pesticides_tonnes": 45000.0,
             }
         }
 
@@ -205,6 +239,7 @@ class DebugResponse(BaseModel):
     current_directory: str
     directory_contents: list[str]
     model_files: list[str]
+    model_features: list[str] | None = None
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -227,7 +262,6 @@ def cors_test():
     return {
         "status": "success",
         "message": "CORS is working correctly!",
-        "headers": dict(os.environ),
     }
 
 @app.get("/debug", response_model=DebugResponse, tags=["General"])
@@ -247,6 +281,11 @@ def debug():
         except:
             pass
     
+    # Get model features if available
+    model_features = None
+    if metadata:
+        model_features = metadata.get('numeric_features', []) + metadata.get('categorical_features', [])
+    
     return DebugResponse(
         base_dir=BASE_DIR,
         models_dir=MODELS_DIR,
@@ -258,6 +297,7 @@ def debug():
         current_directory=os.getcwd(),
         directory_contents=directory_contents,
         model_files=model_files,
+        model_features=model_features,
     )
 
 @app.get("/health", response_model=HealthResponse, tags=["General"])
@@ -306,22 +346,46 @@ def predict(payload: YieldInput):
         )
 
     # Prepare features
-    row = pd.DataFrame([payload.model_dump()])
+    input_data = {
+        "country": payload.country,
+        "crop": payload.crop,
+        "year": payload.year,
+        "rainfall_mm": payload.rainfall_mm,
+        "avg_temp_c": payload.avg_temp_c,
+        "pesticides_tonnes": payload.pesticides_tonnes,
+    }
+    
+    row = pd.DataFrame([input_data])
     row_fe = engineer_features(row)
+    
+    # Log what we're sending to the model
+    print(f"📊 Features being sent to model: {row_fe.columns.tolist()}")
+    print(f"📊 Feature values: {row_fe.iloc[0].to_dict()}")
 
-    # Get feature columns
+    # Get feature columns from metadata or use all columns
     numeric_features = metadata.get("numeric_features", [])
     categorical_features = metadata.get("categorical_features", [])
     feature_cols = numeric_features + categorical_features
     
+    # If metadata doesn't have feature columns, use all columns
     if not feature_cols:
-        # Fallback: use all columns
         feature_cols = row_fe.columns.tolist()
-
+        print(f"⚠️ Using all columns as features: {feature_cols}")
+    
+    # Ensure all feature columns exist
+    missing_cols = [col for col in feature_cols if col not in row_fe.columns]
+    if missing_cols:
+        print(f"❌ Missing columns in input: {missing_cols}")
+        # Add missing columns with default values
+        for col in missing_cols:
+            row_fe[col] = 0.0
+            print(f"➕ Added missing column '{col}' with default value 0")
+    
     try:
         pred_hg_ha = float(model.predict(row_fe[feature_cols])[0])
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
+        print(f"❌ Prediction error: {exc}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(exc)}") from exc
 
     pred_hg_ha = max(pred_hg_ha, 0.0)
     
@@ -336,9 +400,7 @@ def predict(payload: YieldInput):
 @app.options("/{full_path:path}")
 async def options_route(full_path: str):
     """Handle preflight OPTIONS requests for all routes"""
-    return {
-        "message": "OK"
-    }
+    return {"message": "OK"}
 
 if __name__ == "__main__":
     import uvicorn
