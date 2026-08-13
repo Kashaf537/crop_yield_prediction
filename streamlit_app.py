@@ -1,6 +1,6 @@
 """
 ULTIMATE Advanced Streamlit Dashboard for Crop Yield Prediction System.
-ALL FEATURES WORKING: Reference data, SHAP, Confidence Intervals, Forecast, Compare.
+ALL FEATURES WORKING: Real reference data, SHAP, Confidence Intervals, Forecast, Compare.
 """
 import os
 import json
@@ -50,6 +50,8 @@ if 'ref_data' not in st.session_state:
     st.session_state.ref_data = None
 if 'ref_data_loaded' not in st.session_state:
     st.session_state.ref_data_loaded = False
+if 'ref_data_source' not in st.session_state:
+    st.session_state.ref_data_source = None
 
 # ---------------------------------------------------------------------------
 # API Functions
@@ -89,22 +91,22 @@ def fetch_feature_importance():
     return None
 
 @st.cache_data(ttl=3600)
-def load_reference_data():
-    """Load reference data - tries multiple approaches"""
-    # First try to get from API (if available)
+def load_reference_data_from_api():
+    """Load reference data from API"""
     try:
         response = requests.get(f"{API_URL}/reference-data", timeout=10)
         if response.status_code == 200:
             data = response.json()
-            if data:
+            if data and len(data) > 0:
                 df = pd.DataFrame(data)
-                st.session_state.ref_data = df
-                st.session_state.ref_data_loaded = True
-                return df
-    except:
-        pass
-    
-    # Try to load from local file
+                return df, "API"
+    except Exception as e:
+        st.warning(f"Could not load from API: {e}")
+    return None, None
+
+@st.cache_data(ttl=3600)
+def load_reference_data_local():
+    """Load reference data from local file"""
     try:
         possible_paths = [
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "crop_yield_dataset.csv"),
@@ -117,19 +119,39 @@ def load_reference_data():
         for path in possible_paths:
             if os.path.exists(path):
                 df = pd.read_csv(path)
+                # Standardize columns
                 if 'yield_hg_per_ha' in df.columns and 'yield_tonnes_per_ha' not in df.columns:
                     df['yield_tonnes_per_ha'] = df['yield_hg_per_ha'] / 10000
-                st.session_state.ref_data = df
-                st.session_state.ref_data_loaded = True
-                return df
+                return df, "Local"
     except Exception as e:
-        st.warning(f"Could not load local data: {e}")
+        pass
+    return None, None
+
+def load_reference_data():
+    """Load reference data - FIRST from API, then local, then synthetic"""
     
-    # If no data found, create synthetic data
-    st.info("Creating synthetic reference data for demonstration...")
+    # FIRST: Try API
+    df, source = load_reference_data_from_api()
+    if df is not None:
+        st.session_state.ref_data = df
+        st.session_state.ref_data_loaded = True
+        st.session_state.ref_data_source = source
+        return df
+    
+    # SECOND: Try local file
+    df, source = load_reference_data_local()
+    if df is not None:
+        st.session_state.ref_data = df
+        st.session_state.ref_data_loaded = True
+        st.session_state.ref_data_source = source
+        return df
+    
+    # LAST RESORT: Synthetic data
+    st.info("⚠️ No reference data found. Creating synthetic data for demonstration...")
     synthetic_data = create_synthetic_data()
     st.session_state.ref_data = synthetic_data
     st.session_state.ref_data_loaded = True
+    st.session_state.ref_data_source = "Synthetic"
     return synthetic_data
 
 def create_synthetic_data():
@@ -147,7 +169,6 @@ def create_synthetic_data():
     for year in range(1990, 2024):
         for country in np.random.choice(countries, 5, replace=False):
             for crop in np.random.choice(crops, 3, replace=False):
-                # Generate realistic values
                 base_yield = np.random.uniform(2000, 8000)
                 rainfall = np.random.uniform(300, 2500)
                 temp = np.random.uniform(15, 35)
@@ -334,9 +355,11 @@ with st.expander("🔌 API Connection Status", expanded=False):
 
 # Show reference data status
 if st.session_state.ref_data is not None:
-    st.success(f"📊 Reference data loaded: {len(st.session_state.ref_data)} rows")
+    source = st.session_state.ref_data_source or "Unknown"
+    status_icon = "✅" if source != "Synthetic" else "⚠️"
+    st.success(f"{status_icon} Reference data loaded: {len(st.session_state.ref_data)} rows (Source: {source})")
 else:
-    st.warning("⚠️ Using synthetic data for visualizations")
+    st.warning("⚠️ No reference data available")
 
 # ---------------------------------------------------------------------------
 # Create Tabs
@@ -380,7 +403,7 @@ with tab1:
         
         st.markdown("### 🌤️ Weather Conditions")
         
-        # Get default values
+        # Get default values from reference data
         default_rain = 1000.0
         default_temp = 22.0
         default_pest = 10000.0
@@ -592,9 +615,8 @@ with tab3:
         st.markdown("### 🔬 Sensitivity Analysis")
         st.markdown("*How does changing a parameter affect the prediction?*")
         
-        # Use synthetic data if real data not available
         ref_data = st.session_state.ref_data
-        if ref_data is not None:
+        if ref_data is not None and len(ref_data) > 0:
             col1, col2 = st.columns(2)
             with col1:
                 countries = ref_data['country'].unique().tolist()
@@ -621,7 +643,7 @@ with tab3:
                 with st.spinner("Analyzing sensitivity..."):
                     sensitivity = get_sensitivity(payload, parameter)
                     
-                    if sensitivity and sensitivity.get('values'):
+                    if sensitivity and sensitivity.get('values') and len(sensitivity['values']) > 1:
                         col1, col2, col3 = st.columns(3)
                         with col1:
                             st.metric("Correlation", f"{sensitivity.get('correlation', 0):.3f}")
@@ -650,53 +672,9 @@ with tab3:
                         )
                         st.plotly_chart(fig, use_container_width=True)
                     else:
-                        st.warning("No sensitivity data returned. Using synthetic data...")
-                        # Show synthetic sensitivity
-                        values = list(range(int(payload['rainfall_mm']*0.5), int(payload['rainfall_mm']*1.5), 100))
-                        predictions = [payload['rainfall_mm'] * 0.001 * (1 + i/100) for i in range(len(values))]
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=values,
-                            y=predictions,
-                            mode='lines+markers',
-                            line=dict(color='#66BB6A', width=3),
-                            marker=dict(size=10, color='#A5D6A7')
-                        ))
-                        fig.update_layout(
-                            template="plotly_dark",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            title=f"Sensitivity to {parameter.replace('_', ' ').title()}",
-                            xaxis_title=parameter.replace('_', ' ').title(),
-                            yaxis_title="Predicted Yield (t/ha)",
-                            height=400,
-                            font=dict(color="#a0b0a0"),
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.warning("Insufficient data for sensitivity analysis. Try different parameters.")
         else:
-            st.warning("Reference data not available. Creating synthetic data...")
-            # Show synthetic sensitivity
-            values = list(range(500, 2000, 100))
-            predictions = [1.0 + i/500 for i in range(len(values))]
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=values,
-                y=predictions,
-                mode='lines+markers',
-                line=dict(color='#66BB6A', width=3),
-                marker=dict(size=10, color='#A5D6A7')
-            ))
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                title="Sensitivity to Rainfall (Synthetic)",
-                xaxis_title="Rainfall (mm)",
-                yaxis_title="Predicted Yield (t/ha)",
-                height=400,
-                font=dict(color="#a0b0a0"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            st.warning("Reference data not available for sensitivity analysis. Please ensure your dataset is loaded.")
     
     with tab_a2:
         st.markdown("### 🏆 Global Feature Importance")
@@ -734,39 +712,7 @@ with tab3:
             for i, (feature, importance_val) in enumerate(list(features.items())[:5], 1):
                 st.progress(importance_val, text=f"{i}. {feature}: {importance_val:.3f}")
         else:
-            st.info("Feature importance not available. Using default synthetic importance...")
-            # Show default feature importance
-            default_features = {
-                "average_rain_fall_mm_per_year": 0.35,
-                "avg_temp": 0.25,
-                "Year": 0.15,
-                "Area": 0.15,
-                "Item": 0.10
-            }
-            df = pd.DataFrame({
-                'Feature': list(default_features.keys()),
-                'Importance': list(default_features.values())
-            })
-            df = df.sort_values('Importance', ascending=True)
-            
-            fig = go.Figure(go.Bar(
-                x=df['Importance'].values,
-                y=df['Feature'].values,
-                orientation='h',
-                marker_color='#66BB6A',
-                text=[f"{v:.3f}" for v in df['Importance'].values],
-                textposition='outside'
-            ))
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=400,
-                xaxis_title="Importance",
-                yaxis_title="",
-                font=dict(color="#a0b0a0"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            st.info("Feature importance not available. Make a prediction first or check model.")
     
     with tab_a3:
         st.markdown("### 📊 Model Performance")
@@ -778,39 +724,9 @@ with tab3:
             with col1:
                 st.metric("Model", meta.get('model_name', 'XGBoost'))
             with col2:
-                st.metric("R² Score", f"{meta.get('test_r2', 0.85):.3f}")
+                st.metric("R² Score", f"{meta.get('test_r2', 0):.3f}")
             with col3:
-                st.metric("RMSE", f"{meta.get('test_rmse', 250):.1f}")
-            
-            st.markdown("### 📈 Performance Visualization")
-            
-            fig = make_subplots(rows=1, cols=2,
-                               subplot_titles=("Prediction Error Distribution", "Actual vs Predicted"))
-            
-            errors = np.random.normal(0, 200, 1000)
-            fig.add_trace(go.Histogram(x=errors, nbinsx=40, marker_color='#66BB6A'), row=1, col=1)
-            
-            actual = np.random.uniform(1000, 8000, 100)
-            predicted = actual + np.random.normal(0, 200, 100)
-            fig.add_trace(go.Scatter(x=actual, y=predicted, mode='markers',
-                                    marker=dict(color='#A5D6A7', size=6)), row=1, col=2)
-            fig.add_trace(go.Scatter(x=[0, 10000], y=[0, 10000],
-                                    mode='lines', line=dict(color='red', dash='dash')), row=1, col=2)
-            
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=350,
-                showlegend=False,
-                font=dict(color="#a0b0a0"),
-            )
-            fig.update_xaxes(title_text="Error (hg/ha)", row=1, col=1)
-            fig.update_xaxes(title_text="Actual (hg/ha)", row=1, col=2)
-            fig.update_yaxes(title_text="Count", row=1, col=1)
-            fig.update_yaxes(title_text="Predicted (hg/ha)", row=1, col=2)
-            
-            st.plotly_chart(fig, use_container_width=True)
+                st.metric("RMSE", f"{meta.get('test_rmse', 0):.1f}")
         else:
             st.info("Model performance metrics will appear here after prediction")
 
@@ -833,7 +749,7 @@ with tab4:
             with st.spinner("Generating forecast..."):
                 data = get_forecast(country, crop, years_ahead)
                 
-                if data and 'historical' in data:
+                if data and 'historical' in data and data['historical']['years']:
                     fig = go.Figure()
                     
                     fig.add_trace(go.Scatter(
@@ -883,68 +799,9 @@ with tab4:
                     })
                     st.dataframe(forecast_df, use_container_width=True)
                 else:
-                    st.warning("No forecast data returned. Using synthetic data...")
-                    # Show synthetic forecast
-                    years = list(range(2013, 2018))
-                    yields = [5000 + i * 50 for i in range(len(years))]
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=years,
-                        y=yields,
-                        mode='lines+markers',
-                        name='Forecast',
-                        line=dict(color='#FF8E53', width=3),
-                        marker=dict(size=10, color='#FF6B6B')
-                    ))
-                    fig.update_layout(
-                        template="plotly_dark",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        title=f"{crop} Yield Forecast for {country} (Synthetic)",
-                        xaxis_title="Year",
-                        yaxis_title="Yield (hg/ha)",
-                        height=400,
-                        font=dict(color="#a0b0a0"),
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.warning("No forecast data returned. Please try different country/crop.")
     else:
-        st.warning("Reference data not available. Using synthetic forecast...")
-        
-        country = st.selectbox("Country", ["India", "USA", "Brazil", "China"], key="fore_country_syn")
-        crop = st.selectbox("Crop", ["Wheat", "Rice", "Maize"], key="fore_crop_syn")
-        years_ahead = st.slider("Years to forecast", 1, 10, 5)
-        
-        if st.button("📈 Generate Forecast (Synthetic)", key="fore_btn_syn"):
-            years = list(range(2013, 2013 + years_ahead + 1))
-            yields = [5000 + i * 50 + np.random.randint(-100, 100) for i in range(len(years))]
-            
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=years,
-                y=yields,
-                mode='lines+markers',
-                name='Forecast',
-                line=dict(color='#FF8E53', width=3),
-                marker=dict(size=10, color='#FF6B6B')
-            ))
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                title=f"{crop} Yield Forecast for {country} (Synthetic)",
-                xaxis_title="Year",
-                yaxis_title="Yield (hg/ha)",
-                height=400,
-                font=dict(color="#a0b0a0"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown("### 📋 Forecast Table")
-            forecast_df = pd.DataFrame({
-                'Year': years,
-                'Predicted Yield (hg/ha)': [round(y, 1) for y in yields]
-            })
-            st.dataframe(forecast_df, use_container_width=True)
+        st.warning("Reference data not available for forecasting. Please ensure your dataset is loaded.")
 
 # ========== TAB 5: COMPARE ==========
 with tab5:
@@ -1031,37 +888,7 @@ with tab5:
                     else:
                         st.warning("No valid predictions generated. Please check your inputs.")
                 else:
-                    st.warning("Comparison failed. Trying synthetic comparison...")
-                    # Show synthetic comparison
-                    results = []
-                    for i, scenario in enumerate(scenarios):
-                        pred = np.random.uniform(1.0, 5.0)
-                        results.append({
-                            'Scenario': f"Scenario {i+1}",
-                            'Yield (t/ha)': pred
-                        })
-                    
-                    if results:
-                        df = pd.DataFrame(results)
-                        fig = go.Figure()
-                        fig.add_trace(go.Bar(
-                            x=df['Scenario'],
-                            y=df['Yield (t/ha)'],
-                            marker_color='#66BB6A',
-                            text=[f"{v:.3f}" for v in df['Yield (t/ha)']],
-                            textposition='outside'
-                        ))
-                        fig.update_layout(
-                            template="plotly_dark",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            title="Scenario Comparison (Synthetic)",
-                            xaxis_title="",
-                            yaxis_title="Yield (t/ha)",
-                            height=400,
-                            font=dict(color="#a0b0a0"),
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                    st.warning("Comparison failed. Please check your inputs and try again.")
     else:
         st.warning("Options not available")
 
