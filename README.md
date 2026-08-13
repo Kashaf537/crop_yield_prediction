@@ -33,15 +33,9 @@ XGBoost, and LightGBM regressors — deployed as a REST API (FastAPI) and an int
 
 ## 📊 About the Dataset — read this first
 
-> **Note:** an earlier version of this project had a unit conversion bug — it divided
-> `yield_hg_per_ha` by 100,000 to get tonnes/ha instead of the correct 10,000
-> (1 tonne = 10,000 hectograms). This made every displayed tonnes/ha figure 10× too low. It's
-> fixed as of this version; the underlying model was unaffected since it was always trained
-> directly on `yield_hg_per_ha`.
 
 `data/crop_yield_dataset.csv` is a **real, public dataset** built from FAOSTAT crop-yield/pesticide
-records and World Bank climate data: **101 countries, 10 crops, 1990–2013, 25,932 rows** (cleaned
-from a raw 28,242-row file — 2,310 exact duplicates removed by `src/prepare_dataset.py`).
+records and World Bank climate data: **101 countries, 10 crops, 1990–2013, 28,243 rows** 
 
 Columns: `Area, Item, Year, hg/ha_yield (target), average_rain_fall_mm_per_year, pesticides_tonnes,
 avg_temp_c, yield_tonnes_per_ha (convenience column, = yield_hg_per_ha / 10,000)`
