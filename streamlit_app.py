@@ -54,6 +54,65 @@ if 'ref_data_source' not in st.session_state:
     st.session_state.ref_data_source = None
 
 # ---------------------------------------------------------------------------
+# Helper Function - MUST BE DEFINED BEFORE USE
+# ---------------------------------------------------------------------------
+def show_synthetic_sensitivity(parameter="rainfall_mm"):
+    """Show synthetic sensitivity data when real data is unavailable"""
+    
+    # Generate synthetic data
+    values = list(range(500, 2000, 100))
+    predictions = [1.0 + i/500 for i in range(len(values))]
+    
+    # Display metrics (synthetic)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Correlation", "0.985")
+    with col2:
+        st.metric("Sensitivity Score", "0.002")
+    with col3:
+        st.metric("Range", "2.800")
+    
+    # Create synthetic plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=values,
+        y=predictions,
+        mode='lines+markers',
+        line=dict(color='#66BB6A', width=3),
+        marker=dict(size=10, color='#A5D6A7')
+    ))
+    
+    # Add trend line
+    try:
+        z = np.polyfit(values, predictions, 1)
+        p = np.poly1d(z)
+        trend_values = [p(x) for x in values]
+        fig.add_trace(go.Scatter(
+            x=values,
+            y=trend_values,
+            mode='lines',
+            line=dict(color='#FF6B6B', width=2, dash='dash'),
+            name='Trend'
+        ))
+    except:
+        pass
+    
+    fig.update_layout(
+        template="plotly_dark",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        title=f"Sensitivity to {parameter.replace('_', ' ').title()} (Synthetic)",
+        xaxis_title=parameter.replace('_', ' ').title(),
+        yaxis_title="Predicted Yield (t/ha)",
+        height=400,
+        font=dict(color="#a0b0a0"),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.info("ℹ️ Showing synthetic data. Connect to a working API for real sensitivity analysis.")
+
+# ---------------------------------------------------------------------------
 # API Functions
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600)
@@ -338,7 +397,7 @@ else:
     st.warning("⚠️ No reference data available")
 
 # ---------------------------------------------------------------------------
-# Create Tabs (Removed Forecast and Compare)
+# Create Tabs
 # ---------------------------------------------------------------------------
 tab1, tab2, tab3, tab4 = st.tabs([
     "🎯 Predict",
@@ -599,7 +658,6 @@ with tab3:
             if st.button("📊 Analyze Sensitivity", key="sens_btn"):
                 hist = ref_data[ref_data["country"] == country]
                 
-                # Get average values for this country
                 payload = {
                     "country": country,
                     "crop": crop,
@@ -612,14 +670,11 @@ with tab3:
                 with st.spinner("Analyzing sensitivity..."):
                     sensitivity = get_sensitivity(payload, parameter)
                     
-                    # Check if we got valid data
                     if sensitivity and sensitivity.get('values') and sensitivity.get('predictions'):
                         values = sensitivity['values']
                         predictions = sensitivity['predictions']
                         
-                        # Ensure they have the same length
                         if len(values) == len(predictions) and len(values) > 1:
-                            # Display metrics
                             col1, col2, col3 = st.columns(3)
                             with col1:
                                 st.metric("Correlation", f"{sensitivity.get('correlation', 0):.3f}")
@@ -629,7 +684,6 @@ with tab3:
                                 range_val = sensitivity.get('max_prediction', 0) - sensitivity.get('min_prediction', 0)
                                 st.metric("Range", f"{range_val:.3f}")
                             
-                            # Create sensitivity plot
                             fig = go.Figure()
                             fig.add_trace(go.Scatter(
                                 x=values,
@@ -639,7 +693,6 @@ with tab3:
                                 marker=dict(size=10, color='#A5D6A7')
                             ))
                             
-                            # Add trend line only if we have enough points
                             if len(values) > 2:
                                 try:
                                     z = np.polyfit(values, predictions, 1)
@@ -652,8 +705,8 @@ with tab3:
                                         line=dict(color='#FF6B6B', width=2, dash='dash'),
                                         name='Trend'
                                     ))
-                                except Exception as e:
-                                    st.warning("Could not calculate trend line")
+                                except:
+                                    pass
                             
                             fig.update_layout(
                                 template="plotly_dark",
@@ -669,13 +722,13 @@ with tab3:
                             )
                             st.plotly_chart(fig, use_container_width=True)
                         else:
-                            st.warning("Insufficient data for sensitivity analysis. Showing synthetic data...")
+                            st.warning("Insufficient data. Showing synthetic example...")
                             show_synthetic_sensitivity(parameter)
                     else:
-                        st.warning("No data from API. Showing synthetic sensitivity...")
+                        st.warning("No data from API. Showing synthetic example...")
                         show_synthetic_sensitivity(parameter)
         else:
-            st.warning("Reference data not available. Using synthetic data for sensitivity analysis...")
+            st.warning("Reference data not available. Using synthetic data...")
             show_synthetic_sensitivity("rainfall_mm")
     
     with tab_a2:
@@ -842,65 +895,6 @@ with tab4:
         if st.button("🗑️ Clear History"):
             st.session_state.prediction_history = []
             st.rerun()
-
-# ---------------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------------
-def show_synthetic_sensitivity(parameter="rainfall_mm"):
-    """Show synthetic sensitivity data when real data is unavailable"""
-    
-    # Generate synthetic data
-    values = list(range(500, 2000, 100))
-    predictions = [1.0 + i/500 for i in range(len(values))]
-    
-    # Display metrics (synthetic)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Correlation", "0.985")
-    with col2:
-        st.metric("Sensitivity Score", "0.002")
-    with col3:
-        st.metric("Range", "2.800")
-    
-    # Create synthetic plot
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=values,
-        y=predictions,
-        mode='lines+markers',
-        line=dict(color='#66BB6A', width=3),
-        marker=dict(size=10, color='#A5D6A7')
-    ))
-    
-    # Add trend line
-    try:
-        z = np.polyfit(values, predictions, 1)
-        p = np.poly1d(z)
-        trend_values = [p(x) for x in values]
-        fig.add_trace(go.Scatter(
-            x=values,
-            y=trend_values,
-            mode='lines',
-            line=dict(color='#FF6B6B', width=2, dash='dash'),
-            name='Trend'
-        ))
-    except:
-        pass
-    
-    fig.update_layout(
-        template="plotly_dark",
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        title=f"Sensitivity to {parameter.replace('_', ' ').title()} (Synthetic)",
-        xaxis_title=parameter.replace('_', ' ').title(),
-        yaxis_title="Predicted Yield (t/ha)",
-        height=400,
-        font=dict(color="#a0b0a0"),
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    st.info("ℹ️ Showing synthetic data. Connect to a working API for real sensitivity analysis.")
 
 # ---------------------------------------------------------------------------
 # Footer
