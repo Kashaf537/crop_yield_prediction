@@ -89,20 +89,6 @@ st.markdown("""
         z-index: 1;
     }
     
-    .metric-card {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid #2a3a3a;
-        border-radius: 16px;
-        padding: 1.5rem;
-        transition: all 0.3s ease;
-        animation: fadeInUp 0.6s ease-out;
-    }
-    .metric-card:hover {
-        border-color: #4a7a5a;
-        transform: translateY(-2px);
-        box-shadow: 0 8px 30px rgba(0,0,0,0.3);
-    }
-    
     .prediction-result {
         background: linear-gradient(135deg, rgba(102, 187, 106, 0.08) 0%, rgba(17, 24, 39, 0.8) 100%);
         border: 1px solid rgba(102, 187, 106, 0.2);
@@ -118,14 +104,6 @@ st.markdown("""
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         margin: 0.5rem 0;
-    }
-    
-    .shap-card {
-        background: rgba(255,255,255,0.02);
-        border: 1px solid #2a3a3a;
-        border-radius: 16px;
-        padding: 1.5rem;
-        margin: 1rem 0;
     }
     
     .badge-advanced {
@@ -310,56 +288,21 @@ with st.expander("🔌 API Connection Status", expanded=False):
 ref = load_reference_data()
 
 # ---------------------------------------------------------------------------
-# Sidebar - Advanced Navigation
-# ---------------------------------------------------------------------------
-with st.sidebar:
-    st.title("🎯 Navigation")
-    
-    selected = option_menu(
-        menu_title=None,
-        options=[
-            "🎯 Predict",
-            "🧠 Explain", 
-            "📊 Analyze",
-            "📈 Forecast",
-            "⚡ Compare",
-            "📋 History"
-        ],
-        icons=[
-            "target",
-            "brain",
-            "bar-chart",
-            "graph-up",
-            "arrows-expand",
-            "clock-history"
-        ],
-        menu_icon="cast",
-        default_index=0,
-        styles={
-            "container": {"padding": "0!important", "background-color": "transparent"},
-            "icon": {"color": "#A5D6A7", "font-size": "1.1rem"},
-            "nav-link": {
-                "font-size": "0.95rem",
-                "text-align": "left",
-                "margin": "0.2rem 0",
-                "border-radius": "10px",
-                "padding": "0.6rem 1rem",
-                "color": "#a0b0a0",
-            },
-            "nav-link-selected": {
-                "background": "linear-gradient(135deg, rgba(102, 187, 106, 0.2), rgba(17, 24, 39, 0.5))",
-                "border": "1px solid rgba(102, 187, 106, 0.3)",
-                "color": "#A5D6A7",
-            },
-        }
-    )
-
-# ---------------------------------------------------------------------------
-# Main Content - Based on Navigation
+# Main Content - Using Tabs
 # ---------------------------------------------------------------------------
 
-# ========== 1. PREDICT TAB ==========
-if selected == "🎯 Predict":
+# Create tabs for navigation
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "🎯 Predict",
+    "🧠 Explain", 
+    "📊 Analyze",
+    "📈 Forecast",
+    "⚡ Compare",
+    "📋 History"
+])
+
+# ========== TAB 1: PREDICT ==========
+with tab1:
     st.markdown("## 🎯 Make a Prediction")
     
     # Get options
@@ -392,7 +335,6 @@ if selected == "🎯 Predict":
         st.markdown("### 🌤️ Weather Conditions")
         
         with st.container():
-            # Get default values from reference data
             default_rain = 1000.0
             default_temp = 22.0
             default_pest = 10000.0
@@ -442,7 +384,6 @@ if selected == "🎯 Predict":
                 result = make_prediction(payload)
                 
                 if result:
-                    # Store in history
                     st.session_state.prediction_history.append({
                         "timestamp": datetime.now().isoformat(),
                         "country": country,
@@ -452,7 +393,6 @@ if selected == "🎯 Predict":
                         "confidence": result.get('confidence_interval')
                     })
                     
-                    # Display prediction
                     st.markdown("""
                     <div class="prediction-result">
                         <div style="color: #8a9a8a; font-size: 0.9rem;">PREDICTED YIELD</div>
@@ -464,7 +404,6 @@ if selected == "🎯 Predict":
                         result['predicted_yield_hg_per_ha']
                     ), unsafe_allow_html=True)
                     
-                    # Metrics
                     col_a, col_b, col_c = st.columns(3)
                     with col_a:
                         st.metric("Model", result['model_name'])
@@ -473,7 +412,6 @@ if selected == "🎯 Predict":
                     with col_c:
                         st.metric("RMSE", f"{result['model_test_rmse_hg_ha']:.1f}")
                     
-                    # Confidence interval
                     if result.get('confidence_interval'):
                         ci = result['confidence_interval']
                         st.markdown("### 📈 Confidence Interval")
@@ -485,7 +423,6 @@ if selected == "🎯 Predict":
                         with col3:
                             st.metric("Upper", f"{ci['upper']:.2f}")
                     
-                    # Store SHAP values for explanation tab
                     if result.get('shap_values') and result.get('feature_names'):
                         st.session_state.shap_values = {
                             'values': result['shap_values'],
@@ -493,43 +430,19 @@ if selected == "🎯 Predict":
                             'base_value': result.get('base_value', 0)
                         }
                         st.success("🧠 SHAP explanations available in the 'Explain' tab!")
-                    
-                    # Quick sensitivity preview
-                    if st.button("🔬 Quick Sensitivity Analysis"):
-                        sensitivity = get_sensitivity(payload, "rainfall_mm")
-                        if sensitivity:
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(
-                                x=sensitivity['values'],
-                                y=sensitivity['predictions'],
-                                mode='lines+markers',
-                                line=dict(color='#66BB6A', width=3),
-                                marker=dict(size=8, color='#A5D6A7')
-                            ))
-                            fig.update_layout(
-                                template="plotly_dark",
-                                plot_bgcolor="rgba(0,0,0,0)",
-                                paper_bgcolor="rgba(0,0,0,0)",
-                                title="Sensitivity to Rainfall",
-                                xaxis_title="Rainfall (mm)",
-                                yaxis_title="Predicted Yield (t/ha)",
-                                height=300,
-                            )
-                            st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.error("❌ Prediction failed. Please try again.")
         else:
             st.info("👈 Fill in the parameters and click 'Predict Yield'")
 
-# ========== 2. EXPLAIN TAB ==========
-elif selected == "🧠 Explain":
+# ========== TAB 2: EXPLAIN ==========
+with tab2:
     st.markdown("## 🧠 SHAP Explanation")
     st.markdown("*Understand what drives each prediction*")
     
     if st.session_state.shap_values is None:
         st.warning("⚠️ No SHAP explanations available. Make a prediction first in the 'Predict' tab.")
         
-        # Quick prediction form for explanation
         with st.expander("📝 Make a prediction to explain", expanded=True):
             options = st.session_state.options or fetch_options()
             if options:
@@ -566,7 +479,6 @@ elif selected == "🧠 Explain":
         values = shap_data['values']
         base_value = shap_data['base_value']
         
-        # Summary
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Base Value", f"{base_value:.2f} hg/ha")
@@ -577,10 +489,8 @@ elif selected == "🧠 Explain":
             final_pred = base_value + total_contribution
             st.metric("Final Prediction", f"{max(0, final_pred):.2f}")
         
-        # Feature contributions
         st.markdown("### 📊 Feature Contributions")
         
-        # Create DataFrame for plotting
         df = pd.DataFrame({
             'Feature': features,
             'SHAP Value': values,
@@ -588,7 +498,6 @@ elif selected == "🧠 Explain":
         })
         df = df.sort_values('SHAP Value', ascending=True)
         
-        # Horizontal bar chart
         colors = ['#66BB6A' if v > 0 else '#EF5350' for v in df['SHAP Value'].values]
         
         fig = go.Figure(go.Bar(
@@ -610,7 +519,6 @@ elif selected == "🧠 Explain":
         )
         st.plotly_chart(fig, use_container_width=True)
         
-        # Summary of impact
         st.markdown("### 📝 Explanation Summary")
         
         positive = [f for f, v in zip(features, values) if v > 0]
@@ -631,18 +539,17 @@ elif selected == "🧠 Explain":
             if not negative:
                 st.markdown("- None")
         
-        # Clear button
         if st.button("🗑️ Clear Explanation"):
             st.session_state.shap_values = None
             st.rerun()
 
-# ========== 3. ANALYZE TAB ==========
-elif selected == "📊 Analyze":
+# ========== TAB 3: ANALYZE ==========
+with tab3:
     st.markdown("## 📊 Advanced Analysis")
     
-    tab1, tab2, tab3 = st.tabs(["📈 Sensitivity Analysis", "🏆 Feature Importance", "📊 Model Performance"])
+    tab_a1, tab_a2, tab_a3 = st.tabs(["📈 Sensitivity Analysis", "🏆 Feature Importance", "📊 Model Performance"])
     
-    with tab1:
+    with tab_a1:
         st.markdown("### 🔬 Sensitivity Analysis")
         st.markdown("*How does changing a parameter affect the prediction?*")
         
@@ -658,7 +565,6 @@ elif selected == "📊 Analyze":
                 )
             
             if st.button("📊 Analyze Sensitivity"):
-                # Get average values for the country
                 hist = ref[ref["country"] == country]
                 
                 payload = {
@@ -681,7 +587,6 @@ elif selected == "📊 Analyze":
                     with col3:
                         st.metric("Range", f"{sensitivity['max_prediction'] - sensitivity['min_prediction']:.3f}")
                     
-                    # Plot
                     fig = go.Figure()
                     fig.add_trace(go.Scatter(
                         x=sensitivity['values'],
@@ -702,14 +607,13 @@ elif selected == "📊 Analyze":
                     )
                     st.plotly_chart(fig, use_container_width=True)
     
-    with tab2:
+    with tab_a2:
         st.markdown("### 🏆 Global Feature Importance")
         
         importance = fetch_feature_importance()
         if importance:
             features = importance['features']
             
-            # Create DataFrame
             df = pd.DataFrame({
                 'Feature': list(features.keys()),
                 'Importance': list(features.values())
@@ -741,7 +645,7 @@ elif selected == "📊 Analyze":
         else:
             st.info("Feature importance not available. Train the model first.")
     
-    with tab3:
+    with tab_a3:
         st.markdown("### 📊 Model Performance")
         
         if st.session_state.metadata:
@@ -754,43 +658,9 @@ elif selected == "📊 Analyze":
                 st.metric("R² Score", f"{meta.get('test_r2', 0):.3f}")
             with col3:
                 st.metric("RMSE", f"{meta.get('test_rmse', 0):.1f}")
-            
-            # Simulate performance visualization
-            st.markdown("### Simulated Performance Metrics")
-            
-            # Create sample performance chart
-            fig = make_subplots(rows=1, cols=2,
-                               subplot_titles=("Prediction Error Distribution", "Actual vs Predicted"))
-            
-            # Error distribution
-            errors = np.random.normal(0, 200, 1000)
-            fig.add_trace(go.Histogram(x=errors, nbinsx=40, marker_color='#66BB6A'), row=1, col=1)
-            
-            # Actual vs Predicted
-            actual = np.random.uniform(1000, 8000, 100)
-            predicted = actual + np.random.normal(0, 200, 100)
-            fig.add_trace(go.Scatter(x=actual, y=predicted, mode='markers',
-                                    marker=dict(color='#A5D6A7', size=6)), row=1, col=2)
-            fig.add_trace(go.Scatter(x=[0, 10000], y=[0, 10000],
-                                    mode='lines', line=dict(color='red', dash='dash')), row=1, col=2)
-            
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=350,
-                showlegend=False,
-                font=dict(color="#a0b0a0"),
-            )
-            fig.update_xaxes(title_text="Error (hg/ha)", row=1, col=1)
-            fig.update_xaxes(title_text="Actual (hg/ha)", row=1, col=2)
-            fig.update_yaxes(title_text="Count", row=1, col=1)
-            fig.update_yaxes(title_text="Predicted (hg/ha)", row=1, col=2)
-            
-            st.plotly_chart(fig, use_container_width=True)
 
-# ========== 4. FORECAST TAB ==========
-elif selected == "📈 Forecast":
+# ========== TAB 4: FORECAST ==========
+with tab4:
     st.markdown("## 📈 Time Series Forecasting")
     st.markdown("*Predict future crop yields based on historical trends*")
     
@@ -813,10 +683,8 @@ elif selected == "📈 Forecast":
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # Historical + Forecast
                     fig = go.Figure()
                     
-                    # Historical
                     fig.add_trace(go.Scatter(
                         x=data['historical']['years'],
                         y=data['historical']['yields'],
@@ -826,7 +694,6 @@ elif selected == "📈 Forecast":
                         marker=dict(size=8, color='#A5D6A7')
                     ))
                     
-                    # Forecast
                     fig.add_trace(go.Scatter(
                         x=data['forecast']['years'],
                         y=data['forecast']['predicted_yield'],
@@ -849,7 +716,6 @@ elif selected == "📈 Forecast":
                     )
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # Trend info
                     st.markdown("### 📊 Trend Analysis")
                     col1, col2, col3 = st.columns(3)
                     with col1:
@@ -859,7 +725,6 @@ elif selected == "📈 Forecast":
                     with col3:
                         st.metric("Years Forecasted", len(data['forecast']['years']))
                     
-                    # Forecast table
                     st.markdown("### 📋 Forecast Table")
                     forecast_df = pd.DataFrame({
                         'Year': data['forecast']['years'],
@@ -873,14 +738,13 @@ elif selected == "📈 Forecast":
     else:
         st.warning("Reference data not available for forecasting")
 
-# ========== 5. COMPARE TAB ==========
-elif selected == "⚡ Compare":
+# ========== TAB 5: COMPARE ==========
+with tab5:
     st.markdown("## ⚡ Scenario Comparison")
     st.markdown("*Compare multiple scenarios side by side*")
     
     st.info("🔧 Create multiple scenarios to compare their predicted yields.")
     
-    # Scenario inputs
     num_scenarios = st.number_input("Number of scenarios", 2, 5, 2)
     
     scenarios = []
@@ -916,7 +780,6 @@ elif selected == "⚡ Compare":
                 data = response.json()
                 
                 if 'scenarios' in data:
-                    # Create comparison chart
                     results = []
                     for scenario in data['scenarios']:
                         if 'prediction' in scenario:
@@ -948,13 +811,11 @@ elif selected == "⚡ Compare":
                         )
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        # Best and worst
                         if data.get('best_scenario'):
                             st.success(f"🏆 Best: {data['best_scenario']['scenario']} - {data['best_scenario']['prediction']:.3f} t/ha")
                         if data.get('worst_scenario'):
                             st.warning(f"📉 Worst: {data['worst_scenario']['scenario']} - {data['worst_scenario']['prediction']:.3f} t/ha")
                         
-                        # Comparison stats
                         if data.get('comparison'):
                             comp = data['comparison']
                             st.markdown("### 📊 Comparison Statistics")
@@ -970,18 +831,16 @@ elif selected == "⚡ Compare":
         except Exception as e:
             st.error(f"Error: {e}")
 
-# ========== 6. HISTORY TAB ==========
-elif selected == "📋 History":
+# ========== TAB 6: HISTORY ==========
+with tab6:
     st.markdown("## 📋 Prediction History")
     
     if not st.session_state.prediction_history:
         st.info("No predictions made yet. Make a prediction in the 'Predict' tab.")
     else:
-        # Create history dataframe
         history_df = pd.DataFrame(st.session_state.prediction_history)
         history_df['timestamp'] = pd.to_datetime(history_df['timestamp'])
         
-        # Display stats
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Predictions", len(history_df))
@@ -990,13 +849,11 @@ elif selected == "📋 History":
         with col3:
             st.metric("Max Yield", f"{history_df['prediction'].max():.3f} t/ha")
         
-        # History table
         st.markdown("### 📊 Prediction History")
         display_df = history_df[['timestamp', 'country', 'crop', 'year', 'prediction']].copy()
         display_df.columns = ['Time', 'Country', 'Crop', 'Year', 'Yield (t/ha)']
         st.dataframe(display_df, use_container_width=True)
         
-        # Historical trend
         if len(history_df) > 1:
             st.markdown("### 📈 Prediction Trend")
             
@@ -1020,7 +877,6 @@ elif selected == "📋 History":
             )
             st.plotly_chart(fig, use_container_width=True)
         
-        # Clear history
         if st.button("🗑️ Clear History"):
             st.session_state.prediction_history = []
             st.rerun()
