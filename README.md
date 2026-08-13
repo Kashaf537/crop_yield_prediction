@@ -40,8 +40,6 @@ records and World Bank climate data: **101 countries, 10 crops, 1990–2013, 28,
 Columns: `Area, Item, Year, hg/ha_yield (target), average_rain_fall_mm_per_year, pesticides_tonnes,
 avg_temp_c, yield_tonnes_per_ha (convenience column, = yield_hg_per_ha / 10,000)`
 
-
-
 ---
 
 ## 📁 Project Structure
