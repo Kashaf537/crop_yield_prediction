@@ -1,6 +1,5 @@
 # 🌾 Crop Yield Prediction System
 
-
 Predict expected crop yield from country, crop type, and weather data, using Random Forest,
 XGBoost, and LightGBM regressors — deployed as a REST API (FastAPI) and an interactive dashboard
 (Streamlit).
@@ -23,7 +22,7 @@ XGBoost, and LightGBM regressors — deployed as a REST API (FastAPI) and an int
 | **Modeling** | scikit-learn (Random Forest, pipelines, preprocessing), XGBoost, LightGBM |
 | **Evaluation & tuning** | scikit-learn (`GridSearchCV`, `KFold`, `cross_val_score`, metrics) |
 | **Visualization** | Matplotlib, Seaborn (notebook/EDA), Plotly (web app) |
-| **Notebook tooling** | Jupyter, `nbformat` (notebook built programmatically), `nbconvert` (executed headlessly) |
+| **Notebook tooling** | Jupyter |
 | **API** | FastAPI, Pydantic (request/response validation), Uvicorn (ASGI server) |
 | **Web app** | Streamlit, custom CSS theming |
 | **Model persistence** | joblib |
@@ -31,26 +30,26 @@ XGBoost, and LightGBM regressors — deployed as a REST API (FastAPI) and an int
 
 ---
 
-## 📊 About the Dataset — read this first
-
+## 📊 About the Dataset
 
 `data/crop_yield_dataset.csv` is a **real, public dataset** built from FAOSTAT crop-yield/pesticide
-records and World Bank climate data: **101 countries, 10 crops, 1990–2013, 28,243 rows** 
+records and World Bank climate data, used **directly** as a static, pre-cleaned file: **101
+countries, 10 crops, 1990–2013, 25,932 rows** (deduplicated from an original raw export of 28,242
+rows — 2,310 exact duplicate rows removed).
 
-Columns: `Area, Item, Year, hg/ha_yield (target), average_rain_fall_mm_per_year, pesticides_tonnes,
+Columns: `country, crop, year, yield_hg_per_ha (target), rainfall_mm, pesticides_tonnes,
 avg_temp_c, yield_tonnes_per_ha (convenience column, = yield_hg_per_ha / 10,000)`
 
----
 
 ## 📁 Project Structure
 
 ```
 crop_yield_prediction/
 ├── data/
-│   └── crop_yield_dataset.csv      # cleaned real FAO/World Bank dataset (25,932 rows)
+│   └── crop_yield_dataset.csv      # real FAO/World Bank dataset, used directly (25,932 rows)
 ├── notebooks/
 │   └── Crop_Yield_Prediction.ipynb # EDA -> cleaning -> training -> evaluation -> export, pre-executed
-├── images/                         # every chart from the notebook, auto-saved as .png
+├── images/                         # every chart from the notebook, saved as .png
 ├── models/
 │   ├── crop_yield_model.pkl        # trained sklearn Pipeline (preprocessing + tuned XGBoost)
 │   └── model_metadata.pkl          # feature lists, valid countries/crops, test metrics
@@ -58,9 +57,6 @@ crop_yield_prediction/
 │   └── main.py                     # FastAPI inference service
 ├── app/
 │   └── streamlit_app.py            # Streamlit dashboard
-├── src/
-│   ├── prepare_dataset.py          # cleans raw yield_df.csv -> data/crop_yield_dataset.csv
-│   └── build_notebook.py           # programmatically builds the notebook (nbformat)
 ├── requirements.txt
 └── README.md
 ```
@@ -69,14 +65,8 @@ crop_yield_prediction/
 
 ## 🧠 Methodology
 
-### 1. Data Preparation
-The raw FAOSTAT/World Bank export (`yield_df.csv`, 28,242 rows) is loaded by
-`src/prepare_dataset.py`, which renames columns to a consistent snake_case schema, removes 2,310
-exact duplicate rows, and adds a `yield_tonnes_per_ha` convenience column. The result is saved to
-`data/crop_yield_dataset.csv` and used everywhere downstream.
-
-### 2. Exploratory Data Analysis
-Before modeling, the notebook checks the raw shape of the data: distributions, per-crop yield
+### 1. Exploratory Data Analysis
+Before modeling, the notebook examines the raw shape of the data: distributions, per-crop yield
 spread, country rankings, a yearly global trend, and — critically — how much each raw numeric
 feature actually correlates with yield on its own (very little, as it turns out; see limitations
 above).
@@ -106,11 +96,11 @@ above).
 </p>
 <p align="center"><em>Global average yield trend, 1990–2013.</em></p>
 
-### 3. Data Cleaning
-Duplicate removal already happened in step 1; the notebook re-verifies zero duplicates remain and
-checks for any non-positive yield/rainfall values (none found).
+### 2. Data Cleaning
+The notebook verifies zero duplicates remain in the dataset and checks for any non-positive
+yield/rainfall values (none found).
 
-### 4. Feature Engineering
+### 3. Feature Engineering
 With only three raw numeric predictors, a few derived features are added:
 - **`temp_rain_interaction`** — joint heat + moisture signal (`avg_temp_c × rainfall_mm / 1000`)
 - **`log_pesticides`** — log-transform of `pesticides_tonnes`, which spans 4+ orders of magnitude
@@ -119,11 +109,11 @@ With only three raw numeric predictors, a few derived features are added:
 `country` and `crop` are one-hot encoded; numeric features are standard-scaled — both inside a
 single `sklearn` `ColumnTransformer` so preprocessing and model ship together as one pipeline.
 
-### 5. Model Training
+### 4. Model Training
 Three regressors are trained on an 80/20 train-test split, each wrapped in the same
 preprocessing pipeline: **Random Forest**, **XGBoost**, and **LightGBM**.
 
-### 6. Evaluation
+### 5. Evaluation
 Each model is scored on the held-out test set with **RMSE**, **MAE**, and **R²**, plus a 5-fold
 cross-validation pass on the winner for a more robust estimate.
 
@@ -137,7 +127,7 @@ cross-validation pass on the winner for a more robust estimate.
 </p>
 <p align="center"><em>Predicted vs. actual yield for the best model — tight clustering around the diagonal.</em></p>
 
-### 7. Feature Importance
+### 6. Feature Importance
 Confirms what the EDA implied: specific country/crop one-hot columns dominate over the raw
 weather features.
 
@@ -146,11 +136,11 @@ weather features.
 </p>
 <p align="center"><em>Top 15 feature importances for the winning model.</em></p>
 
-### 8. Hyperparameter Tuning
+### 7. Hyperparameter Tuning
 A focused `GridSearchCV` (3-fold CV) around the best-performing model's key hyperparameters
 squeezes out additional accuracy — XGBoost improved from R² 0.975 to **0.985** after tuning.
 
-### 9. Deployment
+### 8. Deployment
 The full pipeline (preprocessing + tuned model) is serialized with `joblib` to
 `models/crop_yield_model.pkl`, along with a metadata file listing feature names, valid
 country/crop values, and test metrics. Both the FastAPI service and the Streamlit app load this
@@ -181,15 +171,7 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. (Optional) Re-run data cleaning
-The raw source file is expected at `/mnt/user-data/uploads/yield_df.csv` in this sandbox; adjust
-`RAW_PATH` in `src/prepare_dataset.py` if running elsewhere. `data/crop_yield_dataset.csv` is
-already generated and checked in.
-```bash
-python src/prepare_dataset.py
-```
-
-### 3. Run the notebook
+### 2. Run the notebook
 Already pre-executed with saved outputs/plots (charts also live in `images/`) — just open and read.
 To re-run yourself:
 ```bash
@@ -198,7 +180,7 @@ jupyter notebook notebooks/Crop_Yield_Prediction.ipynb
 Trains all three models, evaluates them, tunes the best one, saves every chart to `images/`, and
 saves the final pipeline to `models/crop_yield_model.pkl`.
 
-### 4. Launch the FastAPI service
+### 3. Launch the FastAPI service
 ```bash
 cd api
 uvicorn main:app --reload --port 8000
@@ -225,13 +207,15 @@ Response:
 }
 ```
 
-### 5. Launch the Streamlit dashboard
+### 4. Launch the Streamlit dashboard
 ```bash
 cd app
 streamlit run streamlit_app.py
 ```
 Open **http://localhost:8501**. Pick a country/crop (sliders pre-fill with that country's
 historical weather averages), click **Predict Yield**, and see how the prediction compares to the
-historical distribution for that crop.
+historical distribution for that crop, plus a breakdown of which features drove that specific
+prediction.
 
 ---
+
