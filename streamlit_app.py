@@ -612,103 +612,71 @@ with tab3:
                 with st.spinner("Analyzing sensitivity..."):
                     sensitivity = get_sensitivity(payload, parameter)
                     
-                    if sensitivity and sensitivity.get('values') and len(sensitivity['values']) > 1:
-                        # Display metrics
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            st.metric("Correlation", f"{sensitivity.get('correlation', 0):.3f}")
-                        with col2:
-                            st.metric("Sensitivity Score", f"{sensitivity.get('sensitivity_score', 0):.3f}")
-                        with col3:
-                            range_val = sensitivity.get('max_prediction', 0) - sensitivity.get('min_prediction', 0)
-                            st.metric("Range", f"{range_val:.3f}")
+                    # Check if we got valid data
+                    if sensitivity and sensitivity.get('values') and sensitivity.get('predictions'):
+                        values = sensitivity['values']
+                        predictions = sensitivity['predictions']
                         
-                        # Create sensitivity plot
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=sensitivity['values'],
-                            y=sensitivity['predictions'],
-                            mode='lines+markers',
-                            line=dict(color='#66BB6A', width=3),
-                            marker=dict(size=10, color='#A5D6A7')
-                        ))
-                        
-                        # Add trend line
-                        if len(sensitivity['values']) > 2:
-                            z = np.polyfit(sensitivity['values'], sensitivity['predictions'], 1)
-                            p = np.poly1d(z)
-                            trend_values = [p(x) for x in sensitivity['values']]
+                        # Ensure they have the same length
+                        if len(values) == len(predictions) and len(values) > 1:
+                            # Display metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Correlation", f"{sensitivity.get('correlation', 0):.3f}")
+                            with col2:
+                                st.metric("Sensitivity Score", f"{sensitivity.get('sensitivity_score', 0):.3f}")
+                            with col3:
+                                range_val = sensitivity.get('max_prediction', 0) - sensitivity.get('min_prediction', 0)
+                                st.metric("Range", f"{range_val:.3f}")
+                            
+                            # Create sensitivity plot
+                            fig = go.Figure()
                             fig.add_trace(go.Scatter(
-                                x=sensitivity['values'],
-                                y=trend_values,
-                                mode='lines',
-                                line=dict(color='#FF6B6B', width=2, dash='dash'),
-                                name='Trend'
+                                x=values,
+                                y=predictions,
+                                mode='lines+markers',
+                                line=dict(color='#66BB6A', width=3),
+                                marker=dict(size=10, color='#A5D6A7')
                             ))
-                        
-                        fig.update_layout(
-                            template="plotly_dark",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            title=f"Sensitivity to {parameter.replace('_', ' ').title()}",
-                            xaxis_title=parameter.replace('_', ' ').title(),
-                            yaxis_title="Predicted Yield (t/ha)",
-                            height=400,
-                            font=dict(color="#a0b0a0"),
-                            showlegend=True,
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02)
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                            
+                            # Add trend line only if we have enough points
+                            if len(values) > 2:
+                                try:
+                                    z = np.polyfit(values, predictions, 1)
+                                    p = np.poly1d(z)
+                                    trend_values = [p(x) for x in values]
+                                    fig.add_trace(go.Scatter(
+                                        x=values,
+                                        y=trend_values,
+                                        mode='lines',
+                                        line=dict(color='#FF6B6B', width=2, dash='dash'),
+                                        name='Trend'
+                                    ))
+                                except Exception as e:
+                                    st.warning("Could not calculate trend line")
+                            
+                            fig.update_layout(
+                                template="plotly_dark",
+                                plot_bgcolor="rgba(0,0,0,0)",
+                                paper_bgcolor="rgba(0,0,0,0)",
+                                title=f"Sensitivity to {parameter.replace('_', ' ').title()}",
+                                xaxis_title=parameter.replace('_', ' ').title(),
+                                yaxis_title="Predicted Yield (t/ha)",
+                                height=400,
+                                font=dict(color="#a0b0a0"),
+                                showlegend=True,
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.warning("Insufficient data for sensitivity analysis. Showing synthetic data...")
+                            show_synthetic_sensitivity(parameter)
                     else:
-                        st.warning("Insufficient data for sensitivity analysis. Try different parameters or country.")
-                        
-                        # Show fallback synthetic sensitivity
-                        st.markdown("### 📊 Showing Synthetic Sensitivity (Fallback)")
-                        values = list(range(500, 2000, 100))
-                        predictions = [1.0 + i/500 for i in range(len(values))]
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(
-                            x=values,
-                            y=predictions,
-                            mode='lines+markers',
-                            line=dict(color='#66BB6A', width=3),
-                            marker=dict(size=10, color='#A5D6A7')
-                        ))
-                        fig.update_layout(
-                            template="plotly_dark",
-                            plot_bgcolor="rgba(0,0,0,0)",
-                            paper_bgcolor="rgba(0,0,0,0)",
-                            title="Sensitivity to Rainfall (Synthetic)",
-                            xaxis_title="Rainfall (mm)",
-                            yaxis_title="Predicted Yield (t/ha)",
-                            height=400,
-                            font=dict(color="#a0b0a0"),
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.warning("No data from API. Showing synthetic sensitivity...")
+                        show_synthetic_sensitivity(parameter)
         else:
             st.warning("Reference data not available. Using synthetic data for sensitivity analysis...")
-            # Show synthetic sensitivity
-            values = list(range(500, 2000, 100))
-            predictions = [1.0 + i/500 for i in range(len(values))]
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=values,
-                y=predictions,
-                mode='lines+markers',
-                line=dict(color='#66BB6A', width=3),
-                marker=dict(size=10, color='#A5D6A7')
-            ))
-            fig.update_layout(
-                template="plotly_dark",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                title="Sensitivity to Rainfall (Synthetic)",
-                xaxis_title="Rainfall (mm)",
-                yaxis_title="Predicted Yield (t/ha)",
-                height=400,
-                font=dict(color="#a0b0a0"),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            show_synthetic_sensitivity("rainfall_mm")
     
     with tab_a2:
         st.markdown("### 🏆 Global Feature Importance")
@@ -874,6 +842,65 @@ with tab4:
         if st.button("🗑️ Clear History"):
             st.session_state.prediction_history = []
             st.rerun()
+
+# ---------------------------------------------------------------------------
+# Helper Functions
+# ---------------------------------------------------------------------------
+def show_synthetic_sensitivity(parameter="rainfall_mm"):
+    """Show synthetic sensitivity data when real data is unavailable"""
+    
+    # Generate synthetic data
+    values = list(range(500, 2000, 100))
+    predictions = [1.0 + i/500 for i in range(len(values))]
+    
+    # Display metrics (synthetic)
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Correlation", "0.985")
+    with col2:
+        st.metric("Sensitivity Score", "0.002")
+    with col3:
+        st.metric("Range", "2.800")
+    
+    # Create synthetic plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=values,
+        y=predictions,
+        mode='lines+markers',
+        line=dict(color='#66BB6A', width=3),
+        marker=dict(size=10, color='#A5D6A7')
+    ))
+    
+    # Add trend line
+    try:
+        z = np.polyfit(values, predictions, 1)
+        p = np.poly1d(z)
+        trend_values = [p(x) for x in values]
+        fig.add_trace(go.Scatter(
+            x=values,
+            y=trend_values,
+            mode='lines',
+            line=dict(color='#FF6B6B', width=2, dash='dash'),
+            name='Trend'
+        ))
+    except:
+        pass
+    
+    fig.update_layout(
+        template="plotly_dark",
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        title=f"Sensitivity to {parameter.replace('_', ' ').title()} (Synthetic)",
+        xaxis_title=parameter.replace('_', ' ').title(),
+        yaxis_title="Predicted Yield (t/ha)",
+        height=400,
+        font=dict(color="#a0b0a0"),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.info("ℹ️ Showing synthetic data. Connect to a working API for real sensitivity analysis.")
 
 # ---------------------------------------------------------------------------
 # Footer
